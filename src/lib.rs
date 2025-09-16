@@ -1,6 +1,7 @@
-use etcd::Client;
+use futures::Stream;
 use pgrx::prelude::*;
 use supabase_wrappers::prelude::*;
+use tokio::runtime::Runtime;
 
 ::pgrx::pg_module_magic!(name, version);
 
@@ -11,6 +12,7 @@ use supabase_wrappers::prelude::*;
 )]
 pub struct EtcdFdw {
     client: Client,
+    rt: Runtime,
 }
 
 pub enum EtcdFdwError {}
@@ -19,7 +21,10 @@ impl ForeignDataWrapper<EtcdFdw> for EtcdFdw {
     fn new(server: ForeignServer) -> Result<Self, EtcdFdwError> {
         // Open connection to etcd specified through the server parameter
 
-        let client = Client::new([server.server_name], None);
+        let client =
+            Client::new([server.server_name], None).expect("Couldn't connect to etcd server");
+
+        // Perform health checks and throw error on unhealthy
 
         Self { client }
     }
