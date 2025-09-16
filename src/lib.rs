@@ -1,35 +1,79 @@
+use etcd::Client;
 use pgrx::prelude::*;
+use supabase_wrappers::prelude::*;
 
 ::pgrx::pg_module_magic!(name, version);
 
-#[pg_extern]
-fn hello_pg_etcd_fdw_rs() -> &'static str {
-    "Hello, pg_etcd_fdw_rs"
+#[wrappers_fdw(
+    version = "0.0.0",
+    author = "Cybertec PostgreSQL International GmbH",
+    error_type = "EtcdFdwError"
+)]
+pub struct EtcdFdw {
+    client: Client,
 }
 
-#[cfg(any(test, feature = "pg_test"))]
-#[pg_schema]
-mod tests {
-    use pgrx::prelude::*;
+pub enum EtcdFdwError {}
 
-    #[pg_test]
-    fn test_hello_pg_etcd_fdw_rs() {
-        assert_eq!("Hello, pg_etcd_fdw_rs", crate::hello_pg_etcd_fdw_rs());
+impl ForeignDataWrapper<EtcdFdw> for EtcdFdw {
+    fn new(server: ForeignServer) -> Result<Self, EtcdFdwError> {
+        // Open connection to etcd specified through the server parameter
+
+        let client = Client::new([server.server_name], None);
+
+        Self { client }
     }
 
-}
-
-/// This module is required by `cargo pgrx test` invocations.
-/// It must be visible at the root of your extension crate.
-#[cfg(test)]
-pub mod pg_test {
-    pub fn setup(_options: Vec<&str>) {
-        // perform one-off initialization when the pg_test framework starts
+    fn begin_scan(
+        &mut self,
+        quals: &[Qual],
+        columns: &[Column],
+        sorts: &[Sort],
+        limit: &Option<Limit>,
+        options: &std::collections::HashMap<String, String>,
+    ) -> Result<(), EtcdFdw> {
+        todo!()
     }
 
-    #[must_use]
-    pub fn postgresql_conf_options() -> Vec<&'static str> {
-        // return any postgresql.conf settings that are required for your tests
-        vec![]
+    fn iter_scan(&mut self, row: &mut Row) -> Result<Option<()>, EtcdFdw> {
+        todo!()
+    }
+
+    fn end_scan(&mut self) -> Result<(), EtcdFdw> {
+        todo!()
+    }
+
+    fn begin_modify(
+        &mut self,
+        _options: &std::collections::HashMap<String, String>,
+    ) -> Result<(), EtcdFdw> {
+        todo!()
+    }
+
+    fn insert(&mut self, _row: &Row) -> Result<(), EtcdFdw> {
+        todo!()
+    }
+
+    fn update(&mut self, _rowid: &Cell, _new_row: &Row) -> Result<(), EtcdFdw> {
+        todo!()
+    }
+
+    fn delete(&mut self, _rowid: &Cell) -> Result<(), EtcdFdw> {
+        todo!()
+    }
+
+    fn get_rel_size(
+        &mut self,
+        _quals: &[Qual],
+        _columns: &[Column],
+        _sorts: &[Sort],
+        _limit: &Option<Limit>,
+        _options: &std::collections::HashMap<String, String>,
+    ) -> Result<(i64, i32), EtcdFdw> {
+        todo!()
+    }
+
+    fn end_modify(&mut self) -> Result<(), EtcdFdw> {
+        todo!()
     }
 }
