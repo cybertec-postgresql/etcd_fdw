@@ -4,7 +4,10 @@ A foreign data wrapper around etcd for postgres
 ## Setup
 - Install pgrx on your machine `cargo install --locked cargo-pgrx --version 0.14.3`
 - Setup pgrx `cargo pgrx init`
+- Install protoc and protobuf (needed by etcd-client)
+  - Instructions can be found [here](https://protobuf.dev/installation/)
 - Have some kind of etcd you want to test and run
+
 
 ## Build
 - To build simply run `cargo pgrx run` with or without the `--release` flag
@@ -26,7 +29,7 @@ CREATE SERVER my_etcd_server foreign data wrapper etcd_fdw options (connstr '127
 ```
 
 ```sql
-CREATE foreign table test (key text, value text) server my_etcd_server;
+CREATE foreign table test (key text, value text) server my_etcd_server options(rowid 'key');
 ```
 
 ```sql
@@ -41,3 +44,4 @@ Which would yield something like:
  foo | bar
 (2 rows)
 ```
+the rowid option is required. As are the names key and value for the columns.
