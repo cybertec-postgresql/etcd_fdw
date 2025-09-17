@@ -176,7 +176,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         let value = value_string.trim_matches(|x| x == '\'');
 
         // See if key already exists. Error if it does
-        match self.rt.block_on(self.client.get(key.clone(), None)) {
+        match self.rt.block_on(self.client.get(key, None)) {
             Ok(x) => {
                 if let Some(y) = x.kvs().first() {
                     if y.key_str().expect("There should be a key string") == key {
@@ -196,15 +196,42 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         }
     }
 
-    fn update(&mut self, _rowid: &Cell, _new_row: &Row) -> Result<(), EtcdFdwError> {
-        todo!("Update is not yet implemented, since it's unknown what the semantics would be (e.g. what happens when update key happens)")
+    fn update(&mut self, rowid: &Cell, new_row: &Row) -> Result<(), EtcdFdwError> {
+        let key_string = rowid.to_string();
+        let key = key_string.trim_matches(|x| x == '\'');
+
+        match self.rt.block_on(self.client.get(key, None)) {
+            Ok(x) => {
+                if let Some(y) = x.kvs().first() {
+                    if y.key_str().expect("There should be a key string") != key {
+                        return Err(EtcdFdwError::KeyDoesntExist(format!("{}", key)));
+                    }
+                }
+            }
+            Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
+        }
+
+        let value_string = match new_row
+            .cols
+            .iter()
+            .zip(new_row.cells.clone())
+            .filter(|(name, _cell)| *name == "value")
+            .last()
+        {
+            Some(x) => x.1.expect("The value column should be present").to_string(),
+            None => return Err(EtcdFdwError::MissingColumn("value".to_string())),
+        };
+        let value = value_string.trim_matches(|x| x == '\'');
+
+        match self.rt.block_on(self.client.put(key, value, None)) {
+            Ok(_) => Ok(()),
+            Err(e) => return Err(EtcdFdwError::UpdateError(e.to_string())),
+        }
     }
 
     fn delete(&mut self, rowid: &Cell) -> Result<(), EtcdFdwError> {
-        // pgrx::info!("Inside delete");
         let key_string = rowid.to_string();
         let key = key_string.trim_matches(|x| x == '\'');
-        // pgrx::info!("Deleting key: {}", key);
 
         let delete_options = DeleteOptions::new();
 
