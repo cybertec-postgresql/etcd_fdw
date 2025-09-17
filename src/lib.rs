@@ -1,8 +1,10 @@
-use etcd_client::Client;
+use etcd_client::{Client, GetOptions, KeyValue};
 use futures::Stream;
 use pgrx::pg_sys::panic::ErrorReport;
+use pgrx::pg_sys::ErrorContextCallback;
 use pgrx::PgSqlErrorCode;
 use supabase_wrappers::prelude::*;
+use thiserror::Error;
 use tokio::runtime::*;
 
 pgrx::pg_module_magic!();
@@ -15,9 +17,15 @@ pgrx::pg_module_magic!();
 pub(crate) struct EtcdFdw {
     client: Client,
     rt: Runtime,
+    prefix: String,
+    fetch_results: Vec<KeyValue>,
 }
 
-pub enum EtcdFdwError {}
+#[derive(Error, Debug)]
+pub enum EtcdFdwError {
+    #[error("Failed to fetch from etcd")]
+    FetchError(String),
+}
 
 impl From<EtcdFdwError> for ErrorReport {
     fn from(_value: EtcdFdwError) -> Self {
@@ -28,16 +36,24 @@ impl From<EtcdFdwError> for ErrorReport {
 type EtcdFdwResult<T> = std::result::Result<T, EtcdFdwError>;
 
 impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
-    fn new(server: ForeignServer) -> Result<EtcdFdw, EtcdFdwError> {
+    fn new(server: ForeignServer) -> EtcdFdwResult<EtcdFdw> {
         // Open connection to etcd specified through the server parameter
         let rt = tokio::runtime::Runtime::new().unwrap();
         let client = rt
             .block_on(Client::connect(&[server.server_name], None))
             .unwrap();
+        let prefix = match server.options.get("prefix") {
+            Some(x) => x.clone(),
+            None => String::from(""),
+        };
+        let fetch_results = vec![];
 
-        // Perform health checks and throw error on unhealthy
-
-        Ok(Self { client, rt })
+        Ok(Self {
+            client,
+            rt,
+            prefix,
+            fetch_results,
+        })
     }
 
     fn begin_scan(
@@ -48,14 +64,40 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         limit: &Option<Limit>,
         options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
-        todo!()
+        // Select get all rows as a result into a field of the struct
+        // Build Query options from parameters
+        let mut get_options = GetOptions::new().with_all_keys();
+        match limit {
+            Some(x) => get_options = get_options.with_limit(x.count),
+            None => (),
+        }
+        // Also do quals, columns and sorts.
+
+        let result = self
+            .rt
+            .block_on(self.client.get(self.prefix.clone(), Some(get_options)));
+        let mut result_unwrapped = match result {
+            Ok(x) => x,
+            Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
+        };
+        let result_vec = result_unwrapped.take_kvs();
+        self.fetch_results = result_vec;
+        Ok(())
     }
 
-    fn iter_scan(&mut self, row: &mut Row) -> Result<Option<()>, EtcdFdwError> {
-        todo!()
+    fn iter_scan(&mut self, row: &mut Row) -> EtcdFdwResult<Option<()>> {
+        // Go through results row by row and drain the result vector
+        if self.fetch_results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(self.fetch_results.drain(0..1).last().map(|x| {
+                // Unpack x into a row
+                todo!()
+            }))
+        }
     }
 
-    fn end_scan(&mut self) -> Result<(), EtcdFdwError> {
+    fn end_scan(&mut self) -> EtcdFdwResult<()> {
         todo!()
     }
 
