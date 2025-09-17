@@ -24,6 +24,7 @@ etcd-client = "0.16"
 futures = "0.3.31"
 pgrx = {version="=0.14.3"}
 supabase-wrappers = {version="0.1.23", default-features = false}
+thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["full"] }
 
 [dev-dependencies]

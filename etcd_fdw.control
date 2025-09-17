@@ -1,6 +1,6 @@
-comment = 'pg_etcd_fdw_rs:  Created by pgrx'
+comment = 'etcd_fdw:  Created by pgrx'
 default_version = '@CARGO_VERSION@'
-module_pathname = 'pg_etcd_fdw_rs'
+module_pathname = 'etcd_fdw'
 relocatable = false
 superuser = true
 trusted = false
