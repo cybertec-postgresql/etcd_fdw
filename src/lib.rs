@@ -98,7 +98,8 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     }
 
     fn end_scan(&mut self) -> EtcdFdwResult<()> {
-        todo!()
+        self.fetch_results = vec![];
+        Ok(())
     }
 
     fn begin_modify(
