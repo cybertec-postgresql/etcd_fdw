@@ -25,6 +25,12 @@ pub(crate) struct EtcdFdw {
 pub enum EtcdFdwError {
     #[error("Failed to fetch from etcd")]
     FetchError(String),
+
+    #[error("Failed to connect to client")]
+    ClientConnectionError(String),
+
+    #[error("No connection string option was specified. Specify it with connstr")]
+    NoConnStr(()),
 }
 
 impl From<EtcdFdwError> for ErrorReport {
@@ -39,9 +45,17 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     fn new(server: ForeignServer) -> EtcdFdwResult<EtcdFdw> {
         // Open connection to etcd specified through the server parameter
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let client = rt
-            .block_on(Client::connect(&[server.server_name], None))
-            .unwrap();
+
+        // Add parsing for the multi host connection string things here
+        let server_name = match server.options.get("connstr") {
+            Some(x) => x,
+            None => return Err(EtcdFdwError::NoConnStr(())),
+        };
+
+        let client = match rt.block_on(Client::connect(&[server_name], None)) {
+            Ok(x) => x,
+            Err(e) => return Err(EtcdFdwError::ClientConnectionError(e.to_string())),
+        };
         let prefix = match server.options.get("prefix") {
             Some(x) => x.clone(),
             None => String::from(""),
@@ -58,11 +72,11 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
 
     fn begin_scan(
         &mut self,
-        quals: &[Qual],
-        columns: &[Column],
-        sorts: &[Sort],
+        _quals: &[Qual],
+        _columns: &[Column],
+        _sorts: &[Sort],
         limit: &Option<Limit>,
-        options: &std::collections::HashMap<String, String>,
+        _options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
         // Select get all rows as a result into a field of the struct
         // Build Query options from parameters
@@ -92,7 +106,12 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         } else {
             Ok(self.fetch_results.drain(0..1).last().map(|x| {
                 // Unpack x into a row
-                todo!()
+                let key = x.key_str().expect("Expected a key, but the key was empty");
+                let value = x
+                    .value_str()
+                    .expect("Expected a value, but the value was empty");
+                row.push("key", Some(Cell::String(key.to_string())));
+                row.push("value", Some(Cell::String(value.to_string())));
             }))
         }
     }
@@ -106,31 +125,31 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         &mut self,
         _options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
-        todo!()
+        todo!("Begin modify is not yet implemented")
     }
 
     fn insert(&mut self, _row: &Row) -> Result<(), EtcdFdwError> {
-        todo!()
+        todo!("Insert is not yet implemented")
     }
 
     fn update(&mut self, _rowid: &Cell, _new_row: &Row) -> Result<(), EtcdFdwError> {
-        todo!()
+        todo!("Update is not yet implemented")
     }
 
     fn delete(&mut self, _rowid: &Cell) -> Result<(), EtcdFdwError> {
-        todo!()
+        todo!("Delete is not yet implemented")
     }
 
-    fn get_rel_size(
-        &mut self,
-        _quals: &[Qual],
-        _columns: &[Column],
-        _sorts: &[Sort],
-        _limit: &Option<Limit>,
-        _options: &std::collections::HashMap<String, String>,
-    ) -> Result<(i64, i32), EtcdFdwError> {
-        todo!()
-    }
+    // fn get_rel_size(
+    //     &mut self,
+    //     _quals: &[Qual],
+    //     _columns: &[Column],
+    //     _sorts: &[Sort],
+    //     _limit: &Option<Limit>,
+    //     _options: &std::collections::HashMap<String, String>,
+    // ) -> Result<(i64, i32), EtcdFdwError> {
+    //     todo!("Get rel size is not yet implemented")
+    // }
 
     fn end_modify(&mut self) -> Result<(), EtcdFdwError> {
         todo!()
