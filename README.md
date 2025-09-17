@@ -13,20 +13,22 @@ A foreign data wrapper around etcd for postgres
 Currently we can only read from etcd.
 Here's an example of how to connect to your etcd instance and read some KVs
 ```sql
-create extension etcd_fdw;```
-```sql
-CREATE foreign data wrapper etcd_fdw handler etcd_fdw_handler validator etcd_fdw_validator;```
-```sql
-CREATE SERVER my_etcd_server foreign data wrapper etcd_fdw options (connstr '127.0.0.1:2379');```
-```sql
-CREATE foreign table test (key text, value text) server my_etcd_server;```
-```sql
-SELECT * FROM test;```
+CREATE EXTENSION etcd_fdw;
+
+CREATE FOREIGN DATA WRAPPER etcd_fdw HANDLER etcd_fdw_handler VALIDATOR etcd_fdw_validator;
+
+CREATE SERVER my_etcd_server FOREIGN DATA WRAPPER etcd_fdw OPTIONS (connstr '127.0.0.1:2379');
+
+CREATE FOREIGN TABLE test (key text, value text) SERVER my_etcd_server;
+
+SELECT * FROM test;
+```
+
 Which would yield something like:
-`
+```terminal
  key | value
 -----+-------
  bar | baz
  foo | bar
 (2 rows)
-`
+```
