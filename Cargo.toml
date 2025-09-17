@@ -1,5 +1,5 @@
 [package]
-name = "pg_etcd_fdw_rs"
+name = "etcd_fdw"
 version = "0.0.0"
 edition = "2021"
 
@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [[bin]]
-name = "pgrx_embed_pg_etcd_fdw_rs"
+name = "pgrx_embed_etcd_fdw"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]

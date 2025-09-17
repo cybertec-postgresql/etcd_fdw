@@ -5,6 +5,8 @@ use pgrx::PgSqlErrorCode;
 use supabase_wrappers::prelude::*;
 use tokio::runtime::*;
 
+pgrx::pg_module_magic!();
+
 #[wrappers_fdw(
     version = "0.0.1",
     author = "Cybertec PostgreSQL International GmbH",
