@@ -87,7 +87,7 @@ impl From<EtcdFdwError> for ErrorReport {
     }
 }
 
-/// Check weather dependent options exits
+/// Check whether dependent options exits
 /// i.e username & pass, cert & key
 fn require_pair<T>(
     a: &Option<T>,
@@ -179,7 +179,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             None => return Err(EtcdFdwError::NoConnStr(())),
         };
 
-        // TODO: username & pass should be captured seperately i.e. from CREATE USER MAPPING
+        // TODO: username & pass should be captured separately i.e. from CREATE USER MAPPING
         let cacert_path = server.options.get("ssl_ca").cloned();
         let cert_path = server.options.get("ssl_cert").cloned();
         let key_path  = server.options.get("ssl_key").cloned();
