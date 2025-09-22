@@ -211,22 +211,61 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
         }
 
-        let value_string = match new_row
+        let maybe_value = new_row
             .cols
+            .clone()
             .iter()
             .zip(new_row.cells.clone())
             .filter(|(name, _cell)| *name == "value")
-            .last()
-        {
-            Some(x) => x.1.expect("The value column should be present").to_string(),
-            None => return Err(EtcdFdwError::MissingColumn("value".to_string())),
-        };
-        let value = value_string.trim_matches(|x| x == '\'');
+            .map(|(_name, cell)| cell)
+            .last();
 
-        match self.rt.block_on(self.client.put(key, value, None)) {
-            Ok(_) => Ok(()),
-            Err(e) => return Err(EtcdFdwError::UpdateError(e.to_string())),
+        let maybe_key = new_row
+            .cols
+            .clone()
+            .iter()
+            .zip(new_row.cells.clone())
+            .filter(|(name, _cell)| *name == "key")
+            .map(|(_name, cell)| cell)
+            .last();
+
+        match (&maybe_key, &maybe_value) {
+            (None, None) => return Err(EtcdFdwError::MissingColumn("key or value".to_string())),
+            _ => (),
         }
+
+        if let Some(val) = maybe_value {
+            let value_string = val.expect("There should be a value").to_string();
+            let value = value_string.trim_matches(|x| x == '\'');
+
+            match self.rt.block_on(self.client.put(key, value, None)) {
+                Ok(_) => (),
+                Err(e) => return Err(EtcdFdwError::UpdateError(e.to_string())),
+            }
+        }
+
+        if let Some(val) = maybe_key {
+            let key_string = val.expect("There should be a key").to_string();
+            let new_key = key_string.trim_matches(|x| x == '\'');
+            // Get all values for the old key
+            match self.rt.block_on(self.client.get(key, None)) {
+                Ok(x) => {
+                    for kv in x.kvs() {
+                        match self.rt.block_on(self.client.put(new_key, kv.value(), None)) {
+                            Ok(_) => (),
+                            Err(e) => return Err(EtcdFdwError::UpdateError(e.to_string())),
+                        }
+                    }
+                }
+                Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
+            }
+            match self.rt.block_on(self.client.delete(key, None)) {
+                Ok(_) => (),
+                Err(e) => return Err(EtcdFdwError::UpdateError(e.to_string())),
+            }
+        }
+
+        Ok(())
     }
 
     fn delete(&mut self, rowid: &Cell) -> Result<(), EtcdFdwError> {
