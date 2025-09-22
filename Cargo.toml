@@ -20,7 +20,7 @@ pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "supabase-wrappers/pg17"]
 pg_test = []
 
 [dependencies]
-etcd-client = "0.16"
+etcd-client = { version = "0.16", features = ["tls"] }
 futures = "0.3.31"
 pgrx = {version="=0.14.3"}
 supabase-wrappers = {version="0.1.23", default-features = false}

@@ -45,3 +45,50 @@ Which would yield something like:
 (2 rows)
 ```
 the rowid option is required. As are the names key and value for the columns.
+
+
+Usage
+-----
+
+## CREATE SERVER options
+
+`etcd_fdw` accepts the following options via the `CREATE SERVER` command:
+
+- **connstr** as *string*, requuired
+
+  Connetion string for etcd server i.e. `127.0.0.1:2379`
+
+- **ssl_key** as *string*, optional, no default
+
+  The path name of the client private key file.
+
+- **ssl_cert** as *string*, optional, no default
+
+  The path name of the client public key certificate file.
+
+- **ssl_ca** as *string*, optional, no default
+
+  The path name of the Certificate Authority (CA) certificate
+    file. This option, if used, must specify the same certificate used
+    by the server.
+
+- **ssl_servername** as *string*, optional, no default
+
+   The domain name to use for verifying the server’s TLS certificate during the handshake.
+   This value must match the Common Name (CN) or one of the Subject Alternative Names (SANs) in the server’s certificate.
+
+- **username** as *string*, optional, no default
+
+  Username to use when connecting to etcd.
+
+- **password** as *string*, optional, no default
+
+  Password to authenticate to the etcd server with.
+
+- **connect_timeout** as *string*, optional, default = `10`
+
+  Timeout in seconds for establishing the initial connection to the etcd server.
+
+- **request_timeout** as *string*, optional, default = `30`
+
+  Timeout in seconds to each request after the connection has been established.

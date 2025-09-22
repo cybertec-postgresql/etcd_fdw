@@ -1,4 +1,5 @@
-use etcd_client::{Client, DeleteOptions, GetOptions, KeyValue, PutOptions};
+use etcd_client::{Client, ConnectOptions, TlsOptions, Identity, Certificate, Error, DeleteOptions, GetOptions, KeyValue, PutOptions};
+use std::time::Duration;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::PgSqlErrorCode;
 use supabase_wrappers::prelude::*;
@@ -19,6 +20,33 @@ pub(crate) struct EtcdFdw {
     fetch_key: bool,
     fetch_value: bool,
 }
+pub struct EtcdConfig {
+    pub endpoints: Vec<String>,
+    pub ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub servername: Option<String>,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+}
+
+impl Default for EtcdConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+            username: None,
+            password: None,
+            servername: None,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum EtcdFdwError {
@@ -34,6 +62,12 @@ pub enum EtcdFdwError {
     #[error("No connection string option was specified. Specify it with connstr")]
     NoConnStr(()),
 
+    #[error("KeyFile and CertFile must both be present.")]
+    CertKeyMismatch(()),
+
+    #[error("Username and Password must both be specified.")]
+    UserPassMismatch(()),
+
     #[error("Column {0} is not contained in the input dataset")]
     MissingColumn(String),
 
@@ -42,6 +76,9 @@ pub enum EtcdFdwError {
 
     #[error("Key {0} doesn't exist in etcd")]
     KeyDoesntExist(String),
+
+    #[error("Invalid option '{0}' with value '{1}'")]
+    InvalidOption(String, String),
 }
 
 impl From<EtcdFdwError> for ErrorReport {
@@ -50,20 +87,128 @@ impl From<EtcdFdwError> for ErrorReport {
     }
 }
 
+/// Check whether dependent options exits
+/// i.e username & pass, cert & key
+fn require_pair<T>(
+    a: &Option<T>,
+    b: &Option<T>,
+    err: EtcdFdwError,
+) -> Result<(), EtcdFdwError> {
+    match (a, b) {
+        (Some(_), None) | (None, Some(_)) => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// Helper function for parsing timeouts
+fn parse_timeout(
+    options: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: Duration,
+) -> Result<Duration, EtcdFdwError> {
+    if let Some(val) = options.get(key) {
+        match val.parse::<u64>() {
+            Ok(secs) => Ok(Duration::from_secs(secs)),
+            Err(_) => Err(EtcdFdwError::InvalidOption(key.to_string(), val.clone())),
+        }
+    } else {
+        Ok(default)
+    }
+}
+
+
+
+/// Use this to connect to etcd.
+/// Parse the certs/key paths and read them as bytes
+/// Sets the `TlsOptions` if available to support sll connection
+pub async fn connect_etcd(config: EtcdConfig) -> Result<Client, Error> {
+    let mut connect_options = ConnectOptions::new()
+        .with_connect_timeout(config.connect_timeout)
+        .with_timeout(config.request_timeout);
+
+    let use_tls = config.ca_cert_path.is_some() || config.client_cert_path.is_some();
+
+    if use_tls {
+        let mut tls_options = TlsOptions::new();
+
+        // Load CA cert if provided
+        if let Some(ca_path) = &config.ca_cert_path {
+            let ca_bytes = std::fs::read(ca_path).map_err(Error::IoError)?;
+            let ca_cert = Certificate::from_pem(ca_bytes);
+            tls_options = tls_options.ca_certificate(ca_cert);
+        }
+
+        // Load client cert and key if both provided
+        if let (Some(cert_path), Some(key_path)) = (&config.client_cert_path, &config.client_key_path) {
+            let cert_bytes = std::fs::read(cert_path).map_err(Error::IoError)?;
+            let key_bytes  = std::fs::read(key_path).map_err(Error::IoError)?;
+            let identity = Identity::from_pem(cert_bytes, key_bytes);
+            tls_options = tls_options.identity(identity);
+        }
+
+        // Load domain name if provided
+        if let Some(domain) = &config.servername {
+            tls_options = tls_options.domain_name(domain);
+        }
+
+        connect_options = connect_options.with_tls(tls_options);
+    }
+
+    // Load Username and Password
+    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+        connect_options = connect_options.with_user(user, pass);
+    }
+
+    let endpoints: Vec<&str> = config.endpoints.iter().map(|s| s.as_str()).collect();
+    Client::connect(endpoints, Some(connect_options)).await
+}
+
+
 type EtcdFdwResult<T> = std::result::Result<T, EtcdFdwError>;
 
 impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     fn new(server: ForeignServer) -> EtcdFdwResult<EtcdFdw> {
+        let mut config = EtcdConfig::default();
+
         // Open connection to etcd specified through the server parameter
         let rt = tokio::runtime::Runtime::new().expect("Tokio runtime should be initialized");
 
         // Add parsing for the multi host connection string things here
-        let server_name = match server.options.get("connstr") {
-            Some(x) => x,
+        let connstr = match server.options.get("connstr") {
+            Some(x) => x.clone(),
             None => return Err(EtcdFdwError::NoConnStr(())),
         };
 
-        let client = match rt.block_on(Client::connect(&[server_name], None)) {
+        // TODO: username & pass should be captured separately i.e. from CREATE USER MAPPING
+        let cacert_path = server.options.get("ssl_ca").cloned();
+        let cert_path = server.options.get("ssl_cert").cloned();
+        let key_path  = server.options.get("ssl_key").cloned();
+        let servername  = server.options.get("ssl_servername").cloned();
+        let username = server.options.get("username").cloned();
+        let password  = server.options.get("password").cloned();
+
+        // Parse timeouts with defaults
+        let connect_timeout = parse_timeout(&server.options, "connect_timeout", config.connect_timeout)?;
+        let request_timeout = parse_timeout(&server.options, "request_timeout", config.request_timeout)?;
+
+        // ssl_cert + ssl_key must be both present or both absent
+        // username + password must be both present or both absent
+        require_pair(&cert_path, &key_path, EtcdFdwError::CertKeyMismatch(()))?;
+        require_pair(&username, &password, EtcdFdwError::UserPassMismatch(()))?;
+
+        config = EtcdConfig {
+            endpoints: vec![connstr],
+            ca_cert_path: cacert_path,
+            client_cert_path: cert_path,
+            client_key_path: key_path,
+            username: username,
+            password: password,
+            servername: servername,
+            connect_timeout: connect_timeout,
+            request_timeout: request_timeout,
+        };
+
+        let client = match rt.block_on(connect_etcd(config)) {
             Ok(x) => x,
             Err(e) => return Err(EtcdFdwError::ClientConnectionError(e.to_string())),
         };
