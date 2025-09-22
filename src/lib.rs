@@ -28,22 +28,25 @@ pub struct EtcdConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub servername: Option<String>,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
 }
 
-impl EtcdConfig {
-    pub fn new(endpoints: Vec<String>) -> Self {
+impl Default for EtcdConfig {
+    fn default() -> Self {
         Self {
-            endpoints,
+            endpoints: Vec::new(),
             ca_cert_path: None,
             client_cert_path: None,
             client_key_path: None,
             username: None,
             password: None,
             servername: None,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
         }
     }
 }
-
 
 #[derive(Error, Debug)]
 pub enum EtcdFdwError {
@@ -73,6 +76,9 @@ pub enum EtcdFdwError {
 
     #[error("Key {0} doesn't exist in etcd")]
     KeyDoesntExist(String),
+
+    #[error("Invalid option '{0}' with value '{1}'")]
+    InvalidOption(String, String),
 }
 
 impl From<EtcdFdwError> for ErrorReport {
@@ -94,14 +100,31 @@ fn require_pair<T>(
     }
 }
 
+/// Helper function for parsing timeouts
+fn parse_timeout(
+    options: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: Duration,
+) -> Result<Duration, EtcdFdwError> {
+    if let Some(val) = options.get(key) {
+        match val.parse::<u64>() {
+            Ok(secs) => Ok(Duration::from_secs(secs)),
+            Err(_) => Err(EtcdFdwError::InvalidOption(key.to_string(), val.clone())),
+        }
+    } else {
+        Ok(default)
+    }
+}
+
+
 
 /// Use this to connect to etcd.
 /// Parse the certs/key paths and read them as bytes
 /// Sets the `TlsOptions` if available to support sll connection
 pub async fn connect_etcd(config: EtcdConfig) -> Result<Client, Error> {
     let mut connect_options = ConnectOptions::new()
-        .with_connect_timeout(Duration::from_secs(10))
-        .with_timeout(Duration::from_secs(30));
+        .with_connect_timeout(config.connect_timeout)
+        .with_timeout(config.request_timeout);
 
     let use_tls = config.ca_cert_path.is_some() || config.client_cert_path.is_some();
 
@@ -145,6 +168,8 @@ type EtcdFdwResult<T> = std::result::Result<T, EtcdFdwError>;
 
 impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     fn new(server: ForeignServer) -> EtcdFdwResult<EtcdFdw> {
+        let mut config = EtcdConfig::default();
+
         // Open connection to etcd specified through the server parameter
         let rt = tokio::runtime::Runtime::new().expect("Tokio runtime should be initialized");
 
@@ -162,12 +187,16 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         let username = server.options.get("username").cloned();
         let password  = server.options.get("password").cloned();
 
+        // Parse timeouts with defaults
+        let connect_timeout = parse_timeout(&server.options, "connect_timeout", config.connect_timeout)?;
+        let request_timeout = parse_timeout(&server.options, "request_timeout", config.request_timeout)?;
+
         // ssl_cert + ssl_key must be both present or both absent
         // username + password must be both present or both absent
         require_pair(&cert_path, &key_path, EtcdFdwError::CertKeyMismatch(()))?;
         require_pair(&username, &password, EtcdFdwError::UserPassMismatch(()))?;
 
-        let config = EtcdConfig {
+        config = EtcdConfig {
             endpoints: vec![connstr],
             ca_cert_path: cacert_path,
             client_cert_path: cert_path,
@@ -175,6 +204,8 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             username: username,
             password: password,
             servername: servername,
+            connect_timeout: connect_timeout,
+            request_timeout: request_timeout,
         };
 
         let client = match rt.block_on(connect_etcd(config)) {
