@@ -84,3 +84,11 @@ Usage
 - **password** as *string*, optional, no default
 
   Password to authenticate to the etcd server with.
+
+- **connect_timeout** as *string*, optional, default = `10`
+
+  Timeout in seconds for establishing the initial connection to the etcd server.
+
+- **request_timeout** as *string*, optional, default = `30`
+
+  Timeout in seconds to each request after the connection has been established.
