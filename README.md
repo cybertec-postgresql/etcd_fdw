@@ -77,10 +77,10 @@ Usage
    The domain name to use for verifying the server’s TLS certificate during the handshake.
    This value must match the Common Name (CN) or one of the Subject Alternative Names (SANs) in the server’s certificate.
 
-- **username** as *string*, no default
+- **username** as *string*, optional, no default
 
   Username to use when connecting to etcd.
 
-- **password** as *string*, no default
+- **password** as *string*, optional, no default
 
   Password to authenticate to the etcd server with.
