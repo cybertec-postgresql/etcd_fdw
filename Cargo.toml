@@ -27,9 +27,13 @@ pgrx = {version="=0.16.0"}
 supabase-wrappers = {git="https://github.com/supabase/wrappers.git", branch="main",default-features = false}
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["full"] }
+testcontainers = { version = "0.25.0", features = ["blocking"] }
+serde = { version = "1.0.226", features = ["derive"] }
 
 [dev-dependencies]
 pgrx-tests = "=0.16.0"
+testcontainers = { version = "0.25.0", features = ["blocking"] }
+serde = { version = "1.0.226", features = ["derive"] }
 
 [profile.dev]
 panic = "unwind"

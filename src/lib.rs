@@ -1,6 +1,7 @@
 use etcd_client::{Client, DeleteOptions, GetOptions, KeyValue, PutOptions};
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::PgSqlErrorCode;
+use pgrx::*;
 use supabase_wrappers::prelude::*;
 use thiserror::Error;
 
@@ -277,5 +278,74 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     fn end_modify(&mut self) -> Result<(), EtcdFdwError> {
         // This currently also does nothing
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub mod pg_test {
+
+    pub fn setup(_options: Vec<&str>) {
+        // perform one-off initialization when the pg_test framework starts
+    }
+
+    pub fn postgresql_conf_options() -> Vec<&'static str> {
+        // return any postgresql.conf settings that are required for your tests
+        vec![]
+    }
+}
+
+#[pg_schema]
+#[cfg(any(test, feature = "pg_test"))]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use testcontainers::{
+        core::{IntoContainerPort, WaitFor},
+        runners::SyncRunner,
+        GenericImage, ImageExt,
+    };
+
+    #[derive(PostgresType, Serialize, Deserialize, Debug, Eq, PartialEq)]
+    struct KVStruct {
+        key: String,
+        value: String,
+    }
+
+    #[pg_test]
+    fn test_create_table() {
+        let container = GenericImage::new("quay.io/coreos/etcd", "v3.6.4")
+            .with_exposed_port(2379.tcp())
+            // .with_wait_for(WaitFor::message_on_stdout("ready to serve client requests"))
+            .with_wait_for(WaitFor::seconds(20))
+            .with_network("bridge")
+            .start()
+            .expect("An etcd image was supposed to be started");
+
+        let host = container
+            .get_host()
+            .expect("Host-address should be available");
+
+        let port = container
+            .get_host_port_ipv4(2379.tcp())
+            .expect("Exposed host port should be available");
+
+        let url = format!("{}:{}", host, port);
+        dbg!("Testing FDW on container at {}", &url);
+
+        // Create our fdw
+        Spi::run("CREATE FOREIGN DATA WRAPPER etcd_fdw handler etcd_fdw_handler validator etcd_fdw_validator;").expect("FDW should have been created");
+
+        // Create a server
+        Spi::run(
+            format!(
+                "CREATE SERVER etcd_test_server FOREIGN DATA WRAPPER etcd_fdw options(connstr '{}')",
+                url
+            )
+            .as_str(),
+        )
+        .expect("Server should have been created");
+
+        // Create a foreign table
+        Spi::run("CREATE FOREIGN TABLE test (key text, value text) server etcd_test_server options (rowid_column 'key')").expect("Test table should have been created");
     }
 }
