@@ -38,7 +38,7 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-      - run: sudo apt install build-essential bison flex clang protobuf-compiler -y
+      - run: sudo apt install build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev -y
       - run: cargo install cargo-pgrx --version 0.16.0
       - run: cargo pgrx init
       - run: cargo build --verbose
