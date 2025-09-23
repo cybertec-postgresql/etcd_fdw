@@ -1,0 +1,48 @@
+name: Cargo Build & Test
+
+on:
+  push:
+  pull_request:
+
+env: 
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    name: etcd_fdw Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache build/deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache pgrx
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx/
+          key: pgrx-0.16.0
+
+      - name: Install latest stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+      - run: sudo apt install build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev -y
+      - run: cargo install cargo-pgrx --version 0.16.0
+      - run: cargo pgrx init
+      - run: cargo build --verbose
+      - run: cargo test --verbose
+      - run: cargo pgrx test --verbose
+  
+
