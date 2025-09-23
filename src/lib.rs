@@ -310,7 +310,7 @@ mod tests {
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
-        GenericImage, ImageExt,
+        Container, GenericImage, ImageExt,
     };
 
     const CMD: [&'static str; 5] = [
@@ -321,8 +321,7 @@ mod tests {
         "http://0.0.0.0:2379",
     ];
 
-    #[pg_test]
-    fn test_create_table() {
+    fn create_container() -> (Container<GenericImage>, String) {
         let container = GenericImage::new("quay.io/coreos/etcd", "v3.6.4")
             .with_exposed_port(2379.tcp())
             .with_wait_for(WaitFor::message_on_either_std(
@@ -343,9 +342,10 @@ mod tests {
             .expect("Exposed host port should be available");
 
         let url = format!("{}:{}", host, port);
-        dbg!("Testing FDW on container at {}", &url);
+        (container, url)
+    }
 
-        // Create our fdw
+    fn create_fdt(url: String) -> () {
         Spi::run("CREATE FOREIGN DATA WRAPPER etcd_fdw handler etcd_fdw_handler validator etcd_fdw_validator;").expect("FDW should have been created");
 
         // Create a server
@@ -361,45 +361,18 @@ mod tests {
         // Create a foreign table
         Spi::run("CREATE FOREIGN TABLE test (key text, value text) server etcd_test_server options (rowid_column 'key')").expect("Test table should have been created");
     }
+
+    #[pg_test]
+    fn test_create_table() {
+        let (_container, url) = create_container();
+
+        create_fdt(url);
+    }
     #[pg_test]
     fn test_insert_select() {
-        let container = GenericImage::new("quay.io/coreos/etcd", "v3.6.4")
-            .with_exposed_port(2379.tcp())
-            .with_wait_for(WaitFor::message_on_either_std(
-                "ready to serve client requests",
-            ))
-            .with_cmd(CMD)
-            .with_privileged(true)
-            .with_startup_timeout(Duration::from_secs(90))
-            .start()
-            .expect("An etcd image was supposed to be started");
+        let (_container, url) = create_container();
 
-        let host = container
-            .get_host()
-            .expect("Host-address should be available");
-
-        let port = container
-            .get_host_port_ipv4(2379.tcp())
-            .expect("Exposed host port should be available");
-
-        let url = format!("{}:{}", host, port);
-        dbg!("Testing FDW on container at {}", &url);
-
-        // Create our fdw
-        Spi::run("CREATE FOREIGN DATA WRAPPER etcd_fdw handler etcd_fdw_handler validator etcd_fdw_validator;").expect("FDW should have been created");
-
-        // Create a server
-        Spi::run(
-            format!(
-                "CREATE SERVER etcd_test_server FOREIGN DATA WRAPPER etcd_fdw options(connstr '{}')",
-                url
-            )
-            .as_str(),
-        )
-        .expect("Server should have been created");
-
-        // Create a foreign table
-        Spi::run("CREATE FOREIGN TABLE test (key text, value text) server etcd_test_server options (rowid_column 'key')").expect("Test table should have been created");
+        create_fdt(url);
 
         // Insert into the foreign table
         Spi::run("INSERT INTO test (key, value) VALUES ('foo','bar'),('bar','baz')")
