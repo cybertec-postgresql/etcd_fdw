@@ -38,13 +38,10 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-      - run: apt install build-essential bison flex clang protobuf-compiler -y
-      - name: Create user
-        run: |
-          useradd -m test_user
-      - run: sudo -u test_user cargo install cargo-pgrx --version 0.16.0
-      - run: sudo -u test_user cargo pgrx init
-      - run: sudo -u test_user cargo build --verbose
-      - run: sudo -u test_user cargo test --verbose
+      - run: sudo apt install build-essential bison flex clang protobuf-compiler -y
+      - run: cargo install cargo-pgrx --version 0.16.0
+      - run: cargo pgrx init
+      - run: cargo build --verbose
+      - run: cargo test --verbose
   
 
