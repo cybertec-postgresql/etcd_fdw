@@ -38,7 +38,6 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-      - run: apt update
       - run: apt install build-essential bison flex clang protobuf-compiler -y
       - name: Create user
         run: |

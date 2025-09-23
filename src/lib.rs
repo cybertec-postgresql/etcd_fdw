@@ -294,13 +294,6 @@ pub mod pg_test {
     }
 }
 
-// use serde::{Deserialize, Serialize};
-// #[derive(PostgresType, Serialize, Deserialize, Debug, Eq, PartialEq)]
-// struct KVStruct {
-//     pub key: String,
-//     pub value: String,
-// }
-
 #[pg_schema]
 #[cfg(any(test, feature = "pg_test"))]
 mod tests {
