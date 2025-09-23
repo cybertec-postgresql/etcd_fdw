@@ -383,8 +383,41 @@ mod tests {
 
         assert_eq!((Some(format!("foo")), Some(format!("bar"))), query_result);
         let query_result = Spi::get_two::<String, String>("SELECT * FROM test WHERE key='bar'")
-            .expect("Select should work");
+            .expect("SELECT should work");
 
         assert_eq!((Some(format!("bar")), Some(format!("baz"))), query_result);
+    }
+
+    #[pg_test]
+    fn test_update() {
+        let (_container, url) = create_container();
+
+        create_fdt(url);
+
+        Spi::run("INSERT INTO test (key, value) VALUES ('foo','bar'),('bar','baz')")
+            .expect("INSERT should work");
+
+        Spi::run("UPDATE test SET value='test_successful'").expect("UPDATE should work");
+
+        let query_result =
+            Spi::get_one::<String>("SELECT value FROM test;").expect("SELECT should work");
+
+        assert_eq!(Some(format!("test_successful")), query_result);
+    }
+
+    #[pg_test]
+    fn test_delete() {
+        let (_container, url) = create_container();
+
+        create_fdt(url);
+
+        Spi::run("INSERT INTO test (key, value) VALUES ('foo','bar'),('bar','baz')")
+            .expect("INSERT should work");
+
+        Spi::run("DELETE FROM test").expect("DELETE should work");
+
+        let query_result = Spi::get_one::<String>("SELECT value FROM test;");
+
+        assert_eq!(Err(spi::SpiError::InvalidPosition), query_result);
     }
 }
