@@ -294,30 +294,43 @@ pub mod pg_test {
     }
 }
 
+// use serde::{Deserialize, Serialize};
+// #[derive(PostgresType, Serialize, Deserialize, Debug, Eq, PartialEq)]
+// struct KVStruct {
+//     pub key: String,
+//     pub value: String,
+// }
+
 #[pg_schema]
 #[cfg(any(test, feature = "pg_test"))]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use serde::{Deserialize, Serialize};
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
         GenericImage, ImageExt,
     };
 
-    #[derive(PostgresType, Serialize, Deserialize, Debug, Eq, PartialEq)]
-    struct KVStruct {
-        key: String,
-        value: String,
-    }
+    const CMD: [&'static str; 5] = [
+        "/usr/local/bin/etcd",
+        "--listen-client-urls",
+        "http://0.0.0.0:2379",
+        "--advertise-client-urls",
+        "http://0.0.0.0:2379",
+    ];
 
     #[pg_test]
     fn test_create_table() {
         let container = GenericImage::new("quay.io/coreos/etcd", "v3.6.4")
             .with_exposed_port(2379.tcp())
-            // .with_wait_for(WaitFor::message_on_stdout("ready to serve client requests"))
-            .with_wait_for(WaitFor::seconds(20))
-            .with_network("bridge")
+            .with_wait_for(WaitFor::message_on_either_std(
+                "ready to serve client requests",
+            ))
+            .with_privileged(true)
+            .with_cmd(CMD)
+            .with_startup_timeout(Duration::from_secs(90))
             .start()
             .expect("An etcd image was supposed to be started");
 
@@ -347,5 +360,58 @@ mod tests {
 
         // Create a foreign table
         Spi::run("CREATE FOREIGN TABLE test (key text, value text) server etcd_test_server options (rowid_column 'key')").expect("Test table should have been created");
+    }
+    #[pg_test]
+    fn test_insert_select() {
+        let container = GenericImage::new("quay.io/coreos/etcd", "v3.6.4")
+            .with_exposed_port(2379.tcp())
+            .with_wait_for(WaitFor::message_on_either_std(
+                "ready to serve client requests",
+            ))
+            .with_cmd(CMD)
+            .with_privileged(true)
+            .with_startup_timeout(Duration::from_secs(90))
+            .start()
+            .expect("An etcd image was supposed to be started");
+
+        let host = container
+            .get_host()
+            .expect("Host-address should be available");
+
+        let port = container
+            .get_host_port_ipv4(2379.tcp())
+            .expect("Exposed host port should be available");
+
+        let url = format!("{}:{}", host, port);
+        dbg!("Testing FDW on container at {}", &url);
+
+        // Create our fdw
+        Spi::run("CREATE FOREIGN DATA WRAPPER etcd_fdw handler etcd_fdw_handler validator etcd_fdw_validator;").expect("FDW should have been created");
+
+        // Create a server
+        Spi::run(
+            format!(
+                "CREATE SERVER etcd_test_server FOREIGN DATA WRAPPER etcd_fdw options(connstr '{}')",
+                url
+            )
+            .as_str(),
+        )
+        .expect("Server should have been created");
+
+        // Create a foreign table
+        Spi::run("CREATE FOREIGN TABLE test (key text, value text) server etcd_test_server options (rowid_column 'key')").expect("Test table should have been created");
+
+        // Insert into the foreign table
+        Spi::run("INSERT INTO test (key, value) VALUES ('foo','bar'),('bar','baz')")
+            .expect("INSERT should work");
+
+        let query_result = Spi::get_two::<String, String>("SELECT * FROM test WHERE key='foo'")
+            .expect("Select should work");
+
+        assert_eq!((Some(format!("foo")), Some(format!("bar"))), query_result);
+        let query_result = Spi::get_two::<String, String>("SELECT * FROM test WHERE key='bar'")
+            .expect("Select should work");
+
+        assert_eq!((Some(format!("bar")), Some(format!("baz"))), query_result);
     }
 }
