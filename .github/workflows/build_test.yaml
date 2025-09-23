@@ -43,5 +43,6 @@ jobs:
       - run: cargo pgrx init
       - run: cargo build --verbose
       - run: cargo test --verbose
+      - run: cargo pgrx test --verbose
   
 
