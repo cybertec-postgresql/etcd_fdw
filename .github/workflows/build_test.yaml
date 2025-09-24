@@ -40,8 +40,9 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-      - name: Install debian deps
-        run: sudo apt install build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev -y
+      - uses: gerlero/apt-install@v1
+        with: 
+          packages: build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev
       - name: Install pgrx
         run: cargo install cargo-pgrx --version 0.16.0 --locked
         if: steps.cache_pgrx.outputs.cache-hit != 'true'
