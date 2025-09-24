@@ -16,6 +16,7 @@ jobs:
 
       - name: Cache build/deps
         uses: actions/cache@v4
+        id: cache_deps
         with:
           path: |
             ~/.cargo/bin/
@@ -27,6 +28,7 @@ jobs:
 
       - name: Cache pgrx
         uses: actions/cache@v4
+        id: cache_pgrx
         with:
           path: |
             ~/.pgrx/
@@ -38,10 +40,15 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-      - run: sudo apt install build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev -y
-      - run: cargo install cargo-pgrx --version 0.16.0 --locked
+      - name: Install debian deps
+        run: sudo apt install build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev -y
+      - name: Install pgrx
+        run: cargo install cargo-pgrx --version 0.16.0 --locked
+        if: steps.cache_pgrx.outputs.cache-hit != 'true'
       - run: cargo pgrx init
+        if: steps.cache_pgrx.outputs.cache-hit != 'true'
       - run: cargo build --verbose
+        if: steps.cache_deps.outputs.cache-hit != 'true'
       - run: cargo test --verbose
       - run: cargo pgrx test --verbose
   
