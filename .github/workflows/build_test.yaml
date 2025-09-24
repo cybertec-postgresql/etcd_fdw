@@ -39,7 +39,7 @@ jobs:
           override: true
           components: rustfmt, clippy
       - run: sudo apt install build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev -y
-      - run: cargo install cargo-pgrx --version 0.16.0
+      - run: cargo install cargo-pgrx --version 0.16.0 --locked
       - run: cargo pgrx init
       - run: cargo build --verbose
       - run: cargo test --verbose
