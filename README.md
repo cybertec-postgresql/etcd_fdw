@@ -92,3 +92,24 @@ Usage
 - **request_timeout** as *string*, optional, default = `30`
 
   Timeout in seconds to each request after the connection has been established.
+
+## What doesn't work
+etcd_fdw supports almost all kinds of CRUD operations. What doesn't work is modifying the key (which is the rowid value) directly using `UPDATE` statements.
+What does work is the following workflow:
+```
+etcd_fdw=# SELECT * FROM test;
+  key  | value
+-------+-------
+ bar   | baz
+ foo   | abc
+(2 rows)
+etcd_fdw=# INSERT INTO TEST (key,value) SELECT key || '_new', value FROM test;
+INSERT 0 2
+etcd_fdw=# DELETE FROM test WHERE NOT key LIKE '%_new';
+DELETE 2
+etcd_fdw=# SELECT * FROM test;
+    key    | value
+-----------+-------
+ bar_new   | baz
+ foo_new   | abc
+```
