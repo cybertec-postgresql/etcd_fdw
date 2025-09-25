@@ -16,7 +16,6 @@ pgrx::pg_module_magic!();
 pub(crate) struct EtcdFdw {
     client: Client,
     rt: Runtime,
-    prefix: String,
     fetch_results: Vec<KeyValue>,
     fetch_key: bool,
     fetch_value: bool,
@@ -74,6 +73,9 @@ pub enum EtcdFdwError {
 
     #[error("Key {0} already exists in etcd. No duplicates allowed")]
     KeyAlreadyExists(String),
+
+    #[error("Options 'prefix' and 'range' cannot be used together")]
+    ConflictingPrefixAndRange,
 
     #[error("Key {0} doesn't exist in etcd")]
     KeyDoesntExist(String),
@@ -213,16 +215,12 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             Ok(x) => x,
             Err(e) => return Err(EtcdFdwError::ClientConnectionError(e.to_string())),
         };
-        let prefix = match server.options.get("prefix") {
-            Some(x) => x.clone(),
-            None => String::from(""),
-        };
+
         let fetch_results = vec![];
 
         Ok(Self {
             client,
             rt,
-            prefix,
             fetch_results,
             fetch_key: false,
             fetch_value: false,
@@ -237,21 +235,50 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         limit: &Option<Limit>,
         _options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
-        // Select get all rows as a result into a field of the struct
-        // Build Query options from parameters
-        let mut get_options = GetOptions::new().with_all_keys();
-        match limit {
-            Some(x) => get_options = get_options.with_limit(x.count),
-            None => (),
+        // parse the options defined when `CREATE FOREIGN TABLE`
+        let prefix = _options.get("prefix").cloned();
+        let range = _options.get("range").cloned();
+        let keys_only = _options.get("keys_only").map(|v| v == "true").unwrap_or(false);
+        let revision = _options.get("revision").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let mut get_options = GetOptions::new();
+
+        // prefix and range are mutually exclusive
+        match (prefix.as_ref(), range.as_ref()) {
+            (Some(_), Some(_)) => {
+                return Err(EtcdFdwError::ConflictingPrefixAndRange);
+            }
+            (Some(_), None) => {
+                get_options = get_options.with_prefix();
+            }
+            (None, Some(r)) => {
+                get_options = get_options.with_range(r.clone());
+            }
+            (None, None) => {
+                get_options = get_options.with_all_keys();
+            }
         }
+
+        if let Some(x) = limit {
+            get_options = get_options.with_limit(x.count);
+        }
+
+        if keys_only {
+            get_options = get_options.with_keys_only();
+        }
+
+        if revision > 0 {
+            get_options = get_options.with_revision(revision);
+        }
+
         // Check if columns contains key and value
         let colnames: Vec<String> = columns.iter().map(|x| x.name.clone()).collect();
         self.fetch_key = colnames.contains(&String::from("key"));
         self.fetch_value = colnames.contains(&String::from("value"));
 
+        let key = prefix.clone().unwrap_or_else(|| String::from("/"));
         let result = self
             .rt
-            .block_on(self.client.get(self.prefix.clone(), Some(get_options)));
+            .block_on(self.client.get(key, Some(get_options)));
         let mut result_unwrapped = match result {
             Ok(x) => x,
             Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),

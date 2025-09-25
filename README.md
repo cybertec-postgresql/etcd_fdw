@@ -93,6 +93,40 @@ Usage
 
   Timeout in seconds to each request after the connection has been established.
 
+
+## CREATE FOREIGN TABLE options
+
+`etcd_fdw` accepts the following table-level options via the
+`CREATE FOREIGN TABLE` command.
+
+- **rowid** as *string*, mandatory, no default
+
+  Specifies which column should be treated as the unique row identifier.
+  Usually set to key.
+
+- **prefix** as *string*, optional, default `/`
+
+  Restrict the scan to keys beginning with this prefix.
+  If not provided, the FDW will fetch all keys from the etcd server
+
+- **keys_only** as *string*, optional, default `false`
+
+  If set to true, only the keys are fetched, not the values.
+  Useful to reduce network overhead when values are not needed.
+
+- **revision** as *string*, optional, default `0`
+
+  Read key-value data at a specific etcd revision.
+  If 0, the latest revision is used.
+
+- **range** as *string*, optional, no default
+
+  Restricts the scan to the half-open interval `[key, range)`.
+  Example: with range `/gamma` and scan starting at `/`, the query will return keys strictly less than `/gamma`.
+
+
+  Note: Cannot be used together with `prefix`.
+
 ## What doesn't work
 etcd_fdw supports almost all kinds of CRUD operations. What doesn't work is modifying the key (which is the rowid value) directly using `UPDATE` statements.
 What does work is the following workflow:
