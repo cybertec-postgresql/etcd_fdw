@@ -104,7 +104,7 @@ Usage
   Specifies which column should be treated as the unique row identifier.
   Usually set to key.
 
-- **prefix** as *string*, optional, default `/`
+- **prefix** as *string*, optional, default ``
 
   Restrict the scan to keys beginning with this prefix.
   If not provided, the FDW will fetch all keys from the etcd server

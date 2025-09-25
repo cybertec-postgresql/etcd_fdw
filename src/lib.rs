@@ -275,7 +275,8 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         self.fetch_key = colnames.contains(&String::from("key"));
         self.fetch_value = colnames.contains(&String::from("value"));
 
-        let key = prefix.clone().unwrap_or_else(|| String::from("/"));
+        // samllest possible valid key '\0', empty string will not work with with_range
+        let key = prefix.clone().unwrap_or_else(|| String::from("\0"));
         let result = self
             .rt
             .block_on(self.client.get(key, Some(get_options)));
