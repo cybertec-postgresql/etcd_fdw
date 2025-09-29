@@ -29,7 +29,7 @@ CREATE SERVER my_etcd_server foreign data wrapper etcd_fdw options (connstr '127
 ```
 
 ```sql
-CREATE foreign table test (key text, value text) server my_etcd_server options(rowid 'key');
+CREATE foreign table test (key text, value text) server my_etcd_server options(rowid_column 'key');
 ```
 
 ```sql
@@ -92,6 +92,57 @@ Usage
 - **request_timeout** as *string*, optional, default = `30`
 
   Timeout in seconds to each request after the connection has been established.
+
+
+## CREATE FOREIGN TABLE options
+
+`etcd_fdw` accepts the following table-level options via the
+`CREATE FOREIGN TABLE` command.
+
+- **rowid_column** as *string*, mandatory, no default
+
+  Specifies which column should be treated as the unique row identifier.
+  Usually set to key.
+
+- **prefix** as *string*, optional, no default
+
+  Restrict the scan to keys beginning with this prefix.
+  If not provided, the FDW will fetch all keys from the etcd server
+
+- **keys_only** as *string*, optional, default `false`
+
+  If set to true, only the keys are fetched, not the values.
+  Useful to reduce network overhead when values are not needed.
+
+- **revision** as *string*, optional, default `0`
+
+  Read key-value data at a specific etcd revision.
+  If 0, the latest revision is used.
+
+- **key** as *string*, optional, no default
+
+  The starting key to fetch from etcd.
+
+  This option defines the beginning of the range. 
+  If neither `prefix` nor `key` is specified, the FDW will default to `\0` (the lowest possible key).
+
+- **range_end** as *string*, optional, no default
+
+  The exclusive end of the key range. Restricts the scan to the half-open interval `[key, range_end)`.
+
+  All keys between key (inclusive) and range_end (exclusive) will be returned.
+  If range_end is omitted, only the single key defined by key will be returned (unless prefix is used).
+
+- **consistency** as *string*, optional, default `l`
+
+  Specifies the read consistency level for etcd queries.
+
+
+  Linearizable(`l`), Ensures the result reflects the latest consensus state of the cluster.
+  Linearizable reads have higher latency but guarantee fresh data.
+
+  Serializable(`s`), Allows serving results from a local etcd member without cluster-wide consensus. 
+  Serializable reads are faster and lighter on the cluster, but may return stale data in some cases
 
 ## What doesn't work
 etcd_fdw supports almost all kinds of CRUD operations. What doesn't work is modifying the key (which is the rowid value) directly using `UPDATE` statements.
