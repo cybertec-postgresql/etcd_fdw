@@ -1,4 +1,4 @@
-use etcd_client::{Client, ConnectOptions, TlsOptions, Identity, Certificate, Error, DeleteOptions, GetOptions, KeyValue, PutOptions};
+use etcd_client::{Client, ConnectOptions, TlsOptions, Identity, Certificate, Error, DeleteOptions, GetOptions, KeyValue, PutOptions, SortTarget, SortOrder};
 use std::time::Duration;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::PgSqlErrorCode;
@@ -85,6 +85,9 @@ pub enum EtcdFdwError {
 
     #[error("Invalid option '{0}' with value '{1}'")]
     InvalidOption(String, String),
+
+    #[error("Invalid sort field value '{0}'")]
+    InvalidSortField(String),
 
     #[error("{0}")]
     OptionsError(#[from] OptionsError),
@@ -237,7 +240,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         &mut self,
         _quals: &[Qual],
         columns: &[Column],
-        _sorts: &[Sort],
+        sort: &[Sort],
         limit: &Option<Limit>,
         options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
@@ -282,6 +285,30 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
 
         if serializable {
             get_options = get_options.with_serializable();
+        }
+
+        // XXX Support for WHERE clause push-downs is pending
+        // etcd doesn't have anything like WHERE clause because it 
+        // a NOSQL database.
+        // But may be we can still support some simple WHERE
+        // conditions like '<', '>=', 'LIKE', '=' by mapping them
+        // to key, range_end and prefix options.
+
+        // sort pushdown
+        if let Some(first_sort) = sort.first() {
+            let field_name = first_sort.field.to_ascii_uppercase();
+
+            if let Some(target) = SortTarget::from_str_name(&field_name) {
+                let order = if first_sort.reversed {
+                    SortOrder::Descend
+                } else {
+                    SortOrder::Ascend
+                };
+
+                get_options = get_options.with_sort(target, order);
+            } else {
+                return Err(EtcdFdwError::InvalidSortField(first_sort.field.clone()));
+            }
         }
 
         // preference order : prefix > key_start > default "\0"

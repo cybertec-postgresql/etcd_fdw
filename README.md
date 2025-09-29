@@ -47,6 +47,18 @@ Which would yield something like:
 the rowid option is required. As are the names key and value for the columns.
 
 
+## Pushdowning
+
+#### ORDER BY push-down
+`etcd_fdw` now also supports order by push-down. If possible, push order by
+clause to the remote server so that we get the ordered result set from the
+foreign server itself.
+
+#### LIMIT push-down
+`etcd_fdw` now also supports limit offset push-down. Wherever possible,
+perform LIMIT operations on the remote server. 
+
+
 Usage
 -----
 
