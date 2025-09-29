@@ -239,15 +239,15 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         columns: &[Column],
         _sorts: &[Sort],
         limit: &Option<Limit>,
-        _options: &std::collections::HashMap<String, String>,
+        options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
         // parse the options defined when `CREATE FOREIGN TABLE`
-        let prefix = _options.get("prefix").cloned();
-        let range_end = _options.get("range_end").cloned();
-        let key_start = _options.get("key").cloned();
-        let keys_only = _options.get("keys_only").map(|v| v == "true").unwrap_or(false);
-        let revision = _options.get("revision").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-        let serializable = _options.get("consistency").map(|v| v == "s").unwrap_or(false);
+        let prefix = options.get("prefix").cloned();
+        let range_end = options.get("range_end").cloned();
+        let key_start = options.get("key").cloned();
+        let keys_only = options.get("keys_only").map(|v| v == "true").unwrap_or(false);
+        let revision = options.get("revision").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let serializable = options.get("consistency").map(|v| v == "s").unwrap_or(false);
         let mut get_options = GetOptions::new();
 
         // prefix and range are mutually exclusive
