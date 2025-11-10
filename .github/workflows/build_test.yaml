@@ -2,7 +2,13 @@ name: Cargo Build & Test
 
 on:
   push:
+    branches:
+      - main  
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env: 
   CARGO_TERM_COLOR: always
@@ -32,7 +38,7 @@ jobs:
         with:
           path: |
             ~/.pgrx/
-          key: pgrx-0.16.0
+          key: pgrx-0.16.1
 
       - name: Install latest stable toolchain
         uses: actions-rs/toolchain@v1
@@ -44,7 +50,7 @@ jobs:
         with: 
           packages: build-essential bison flex clang protobuf-compiler libreadline8 libreadline-dev
       - name: Install pgrx
-        run: cargo install cargo-pgrx --version 0.16.0 --locked
+        run: cargo install cargo-pgrx --version 0.16.1 --locked
         if: steps.cache_pgrx.outputs.cache-hit != 'true'
       - run: cargo pgrx init
         if: steps.cache_pgrx.outputs.cache-hit != 'true'
