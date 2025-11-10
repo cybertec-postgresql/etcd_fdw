@@ -2,7 +2,7 @@
 A foreign data wrapper around etcd for postgres
 
 ## Setup
-- Install pgrx on your machine `cargo install --locked cargo-pgrx --version 0.14.3`
+- Install pgrx on your machine `cargo install --locked cargo-pgrx --version 0.16.1`
 - Setup pgrx `cargo pgrx init`
 - Install protoc and protobuf (needed by etcd-client)
   - Instructions can be found [here](https://protobuf.dev/installation/)
