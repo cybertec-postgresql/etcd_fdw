@@ -58,6 +58,10 @@ foreign server itself.
 `etcd_fdw` now also supports limit offset push-down. Wherever possible,
 perform LIMIT operations on the remote server. 
 
+#### WHERE push-down
+`etcd_fdw` now supports WHERE clause push-down for simple key-based comparisons. Whenever possible, equality and range conditions are translated into etcd key scans, so filtering is done on the remote server.
+Currently supported operators: `=`, `>=`, `>`, `<=`, `<`, `BETWEEN`, and `LIKE 'prefix%'`.
+This behavior is consistent with the prefix, range_end, and key options in `CREATE FOREIGN TABLE`.
 
 Usage
 -----
