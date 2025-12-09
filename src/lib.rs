@@ -251,25 +251,10 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         let keys_only = options.get("keys_only").map(|v| v == "true").unwrap_or(false);
         let revision = options.get("revision").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
         let serializable = options.get("consistency").map(|v| v == "s").unwrap_or(false);
+        let mut qual_key_start: Option<String> = None;
+        let mut qual_prefix: Option<String> = None;
+        let mut qual_range_end: Option<String> = None;
         let mut get_options = GetOptions::new();
-
-        // prefix and range are mutually exclusive
-        match (prefix.as_ref(), range_end.as_ref()) {
-            (Some(_), Some(_)) => {
-                return Err(EtcdFdwError::ConflictingPrefixAndRange);
-            }
-            (Some(_), None) => {
-                get_options = get_options.with_prefix();
-            }
-            (None, Some(r)) => {
-                get_options = get_options.with_range(r.clone());
-            }
-            (None, None) => {
-                if key_start.is_none() {
-                    get_options = get_options.with_all_keys();
-                }
-            }
-        }
 
         if let Some(x) = limit {
             get_options = get_options.with_limit(x.count);
@@ -287,12 +272,136 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             get_options = get_options.with_serializable();
         }
 
-        // XXX Support for WHERE clause push-downs is pending
-        // etcd doesn't have anything like WHERE clause because it 
-        // a NOSQL database.
-        // But may be we can still support some simple WHERE
-        // conditions like '<', '>=', 'LIKE', '=' by mapping them
-        // to key, range_end and prefix options.
+        // WHERE clause pushdown
+        for q in _quals {
+            // only pushdown "key"
+            if q.field != "key" {
+                continue;
+            }
+
+            // extract string value
+            let v = match &q.value {
+                Value::Cell(Cell::String(s)) => s.clone(),
+                _ => continue,
+            };
+
+            match q.operator.as_str() {
+                "=" => {
+                    // equal: start at v, end at v+"\0"
+                    qual_key_start = Some(v.clone());
+                    qual_range_end = Some(format!("{}\0", v));
+                }
+                ">=" => {
+                    // greater or equal: start at v
+                    qual_key_start = Some(v.clone());
+                }
+                ">" => {
+                    // greater than: start at v+"\0"
+                    qual_key_start = Some(format!("{}\0", v));
+                }
+                "<" => {
+                    // less than: end at v
+                    qual_range_end = Some(v.clone());
+                }
+                "<=" => {
+                    // less or equal: end at v+"\0"
+                    qual_range_end = Some(format!("{}\0", v));
+                }
+                "~~" => {
+                    // LIKE operator with % suffix only
+                    if let Some(pref) = v.strip_suffix('%') {
+                        qual_prefix = Some(pref.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Determine the effective prefix based on FDW and WHERE clause options
+        // If both are present, ensure one is a prefix of the other
+        // Otherwise, no data will be fetched
+        // If only one is present, use that as the prefix
+        let eff_prefix = match (prefix.as_ref(), qual_prefix.as_ref()) {
+            (Some(_fdw), Some(_where)) => {
+                if _where.starts_with(_fdw) {
+                    Some(_where.clone())
+                } else if _fdw.starts_with(_where) {
+                    Some(_fdw.clone())
+                } else {
+                    return Ok(());
+                }
+            }
+            (Some(_fdw), None) => Some(_fdw.clone()),
+            (None, Some(_where)) => Some(_where.clone()),
+            (None, None) => None,
+        };
+
+        // Determine the effective key start based on FDW and WHERE clause options
+        // If both are present, take the larger one
+        // Otherwise, take whichever is present
+        // If neither is present, start from the beginning
+        let eff_key_start = match (&qual_key_start, &key_start) {
+            (Some(_where), Some(_fdw)) => {
+                if _where > _fdw {
+                    _where.clone()
+                } else {
+                    _fdw.clone()
+                }
+            }
+            (Some(_where), None) => _where.clone(),
+            (None, Some(_fdw)) => _fdw.clone(),
+            (None, None) => "\0".to_string(), // start from the beginning
+        };
+
+        // Determine the effective range end based on FDW and WHERE clause options
+        // If both are present, take the smaller one
+        // Otherwise, take whichever is present
+        // If neither is present, go to the end
+        let mut eff_range_end = match (&qual_range_end, &range_end) {
+            (Some(_where), Some(_fdw)) => {
+                if _where < _fdw {
+                    _where.clone()
+                } else {
+                    _fdw.clone()
+                }
+            }
+            (Some(_where), None) => _where.clone(),
+            (None, Some(_fdw)) => _fdw.clone(),
+            (None, None) => "\u{10FFFF}".to_string(), // go to the end
+        };
+
+        // Compute range_end for prefix
+        // If a prefix is provided, calculate the range_end by incrementing the last byte of the prefix
+        // This ensures that the range_end is exclusive and covers all keys starting with the prefix
+        if let Some(p) = &eff_prefix {
+            let mut bytes = p.as_bytes().to_vec();
+            for i in (0..bytes.len()).rev() {
+                if bytes[i] < 0xFF {
+                    bytes[i] += 1;
+                    bytes.truncate(i + 1);
+                    let prefix_range_end = String::from_utf8(bytes).unwrap();
+                    // Ensure the calculated range_end does not exceed the effective range_end
+                    if prefix_range_end < eff_range_end {
+                        eff_range_end = prefix_range_end;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Determine the effective key to start the scan
+        // If a prefix is provided, use it as the base key and enable prefix-based scanning
+        // Otherwise, use the effective key start
+        let key = match &eff_prefix {
+            Some(p) => {
+                get_options = get_options.with_prefix();
+                // Ensure the key starts from the larger of the prefix or the effective key start
+                std::cmp::max(eff_key_start.clone(), p.clone())
+            }
+            None => eff_key_start.clone(),
+        };
+
+        get_options = get_options.with_range(eff_range_end);
 
         // sort pushdown
         if let Some(first_sort) = sort.first() {
@@ -310,12 +419,6 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 return Err(EtcdFdwError::InvalidSortField(first_sort.field.clone()));
             }
         }
-
-        // preference order : prefix > key_start > default "\0"
-        // samllest possible valid key '\0'
-        let key = prefix.clone()
-                        .or_else(|| key_start.clone())
-                        .unwrap_or_else(|| String::from("\0"));
 
         // Check if columns contains key and value
         let colnames: Vec<String> = columns.iter().map(|x| x.name.clone()).collect();
