@@ -17,6 +17,7 @@ pub(crate) struct EtcdFdw {
     client: Client,
     rt: Runtime,
     fetch_results: Vec<KeyValue>,
+    tgt_cols: Vec<Column>,
     fetch_key: bool,
     fetch_value: bool,
 }
@@ -231,6 +232,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             client,
             rt,
             fetch_results,
+            tgt_cols: Vec::new(),
             fetch_key: false,
             fetch_value: false,
         })
@@ -434,6 +436,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         };
         let result_vec = result_unwrapped.take_kvs();
         self.fetch_results = result_vec;
+        self.tgt_cols = columns.to_vec();
         Ok(())
     }
 
@@ -448,11 +451,13 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 let value = x
                     .value_str()
                     .expect("Expected a value, but the value was empty");
-                if self.fetch_key {
-                    row.push("key", Some(Cell::String(key.to_string())));
-                }
-                if self.fetch_value {
-                    row.push("value", Some(Cell::String(value.to_string())));
+                for tgt_col in &self.tgt_cols {
+                    if tgt_col.name == "key" {
+                        row.push(&tgt_col.name, Some(Cell::String(key.to_string())));
+                    }
+                    if tgt_col.name == "value" {
+                        row.push(&tgt_col.name, Some(Cell::String(value.to_string())));
+                    }
                 }
             }))
         }
@@ -765,5 +770,63 @@ mod tests {
         let query_result = Spi::get_one::<String>("SELECT value FROM test;");
 
         assert_eq!(Err(spi::SpiError::InvalidPosition), query_result);
+    }
+
+    #[pg_test]
+    fn test_select_value_only_with_key_filter() {
+        // Test for issue #26: selecting only value column with WHERE clause on key
+        let (_container, url) = create_container();
+
+        create_fdt(url);
+
+        // Insert test data
+        Spi::run("INSERT INTO test (key, value) VALUES ('key1','value1'),('key2','value2'),('key3','value3')")
+            .expect("INSERT should work");
+
+        // Test 1: SELECT value WHERE key = 'key2' should return the value
+        let query_result = Spi::get_one::<String>("SELECT value FROM test WHERE key = 'key2'")
+            .expect("SELECT value with key filter should work");
+
+        assert_eq!(Some(format!("value2")), query_result);
+
+        // Test 2: SELECT key WHERE key = 'key1' should also work
+        let query_result = Spi::get_one::<String>("SELECT key FROM test WHERE key = 'key1'")
+            .expect("SELECT key with key filter should work");
+
+        assert_eq!(Some(format!("key1")), query_result);
+
+        // Test 3: SELECT * WHERE key = 'key3' should work (baseline)
+        let query_result = Spi::get_two::<String, String>("SELECT * FROM test WHERE key = 'key3'")
+            .expect("SELECT * with key filter should work");
+
+        assert_eq!((Some(format!("key3")), Some(format!("value3"))), query_result);
+    }
+
+    #[pg_test]
+    fn test_update_value_only_with_key_filter() {
+        // Test for issue #26: UPDATE with only value column when key is in WHERE clause
+        let (_container, url) = create_container();
+
+        create_fdt(url);
+
+        // Insert test data
+        Spi::run("INSERT INTO test (key, value) VALUES ('gather/78','original_value'),('gather/84','other_value')")
+            .expect("INSERT should work");
+
+        // Update without including key column in SET clause
+        Spi::run("UPDATE test SET value = 'updated_value' WHERE key = 'gather/84'")
+            .expect("UPDATE with key filter should work");
+
+        // Verify the update worked
+        let query_result = Spi::get_one::<String>("SELECT value FROM test WHERE key = 'gather/84'")
+            .expect("SELECT after UPDATE should work");
+
+        assert_eq!(Some(format!("updated_value")), query_result);
+
+        // Verify other row was not affected
+        let query_result = Spi::get_one::<String>("SELECT value FROM test WHERE key = 'gather/78'")
+            .expect("SELECT other row should work");
+
+        assert_eq!(Some(format!("original_value")), query_result);
     }
 }
