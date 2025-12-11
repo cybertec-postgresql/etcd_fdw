@@ -1,18 +1,21 @@
 # etcd_fdw
+
 A foreign data wrapper around etcd for postgres
 
 ## Setup
+
 - Install pgrx on your machine `cargo install --locked cargo-pgrx --version 0.16.1`
 - Setup pgrx `cargo pgrx init`
 - Install protoc and protobuf (needed by etcd-client)
-  - Instructions can be found [here](https://protobuf.dev/installation/)
+  - Instructions can be found [on the official site](https://protobuf.dev/installation/)
 - Have some kind of etcd you want to test and run
 
-
 ## Build
+
 - To build simply run `cargo pgrx run` with or without the `--release` flag
 
 ## Try out something yourself
+
 Currently we can only read from etcd.
 Here's an example of how to connect to your etcd instance and read some KVs
 
@@ -37,6 +40,7 @@ SELECT * FROM test;
 ```
 
 Which would yield something like:
+
 ```
  key | value
 -----+-------
@@ -44,29 +48,33 @@ Which would yield something like:
  foo | bar
 (2 rows)
 ```
-the rowid option is required. As are the names key and value for the columns.
 
+the rowid option is required. As are the names key and value for the columns.
 
 ## Pushdowning
 
-#### ORDER BY push-down
+`etcd_fdw` supports push-down of filters, order by and limit clauses to the etcd server.
+
+### ORDER BY push-down
+
 `etcd_fdw` now also supports order by push-down. If possible, push order by
 clause to the remote server so that we get the ordered result set from the
 foreign server itself.
 
-#### LIMIT push-down
+### LIMIT push-down
+
 `etcd_fdw` now also supports limit offset push-down. Wherever possible,
-perform LIMIT operations on the remote server. 
+perform LIMIT operations on the remote server.
 
 #### WHERE push-down
+
 `etcd_fdw` now supports WHERE clause push-down for simple key-based comparisons. Whenever possible, equality and range conditions are translated into etcd key scans, so filtering is done on the remote server.
 Currently supported operators: `=`, `>=`, `>`, `<=`, `<`, `BETWEEN`, and `LIKE 'prefix%'`.
 This behavior is consistent with the prefix, range_end, and key options in `CREATE FOREIGN TABLE`.
 
-Usage
------
+## Usage
 
-## CREATE SERVER options
+### CREATE SERVER options
 
 `etcd_fdw` accepts the following options via the `CREATE SERVER` command:
 
@@ -109,8 +117,7 @@ Usage
 
   Timeout in seconds to each request after the connection has been established.
 
-
-## CREATE FOREIGN TABLE options
+### CREATE FOREIGN TABLE options
 
 `etcd_fdw` accepts the following table-level options via the
 `CREATE FOREIGN TABLE` command.
@@ -139,7 +146,7 @@ Usage
 
   The starting key to fetch from etcd.
 
-  This option defines the beginning of the range. 
+  This option defines the beginning of the range.
   If neither `prefix` nor `key` is specified, the FDW will default to `\0` (the lowest possible key).
 
 - **range_end** as *string*, optional, no default
@@ -153,16 +160,17 @@ Usage
 
   Specifies the read consistency level for etcd queries.
 
-
   Linearizable(`l`), Ensures the result reflects the latest consensus state of the cluster.
   Linearizable reads have higher latency but guarantee fresh data.
 
-  Serializable(`s`), Allows serving results from a local etcd member without cluster-wide consensus. 
+  Serializable(`s`), Allows serving results from a local etcd member without cluster-wide consensus.
   Serializable reads are faster and lighter on the cluster, but may return stale data in some cases
 
 ## What doesn't work
+
 etcd_fdw supports almost all kinds of CRUD operations. What doesn't work is modifying the key (which is the rowid value) directly using `UPDATE` statements.
 What does work is the following workflow:
+
 ```
 etcd_fdw=# SELECT * FROM test;
   key  | value
