@@ -1,0 +1,28 @@
+{
+    "name": "rust-dev",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {},
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+        "ghcr.io/devcontainers/features/git:1": {},
+        "ghcr.io/devcontainers/features/github-cli:1": {}
+    },
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal.integrated.shell.linux": "/bin/bash"
+            },            
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "fill-labs.dependi",
+                "mk12.better-git-line-blame"
+            ]
+        }
+    },
+    "remoteUser": "vscode",
+    "mounts": [
+        "source=cargo-registry,target=/usr/local/cargo/registry,type=volume"
+    ]
+}
