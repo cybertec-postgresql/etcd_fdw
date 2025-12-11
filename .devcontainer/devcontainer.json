@@ -1,0 +1,26 @@
+{
+    "name": "rust-dev",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {},
+        "git": "latest"
+    },
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal.integrated.shell.linux": "/bin/bash"
+            },            
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "serayuzgur.crates"
+            ]
+        }
+    },
+    "mounts": [
+        "source=cargo-home,target=/usr/local/cargo,type=volume",
+        "source=cargo-registry,target=/usr/local/cargo/registry,type=volume",
+        "source=cargo-target,target=/workspace/target,type=volume"
+    ]
+}

@@ -2,7 +2,27 @@
 
 A foreign data wrapper around etcd for postgres
 
-## Setup
+## Development Setup
+
+### Option 1: Using DevContainer
+
+The easiest way to get started is using the provided DevContainer configuration:
+
+1. **Prerequisites**
+   - [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine
+   - [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+2. **Open in DevContainer**
+   - Open this project in VS Code
+   - Press `F1` and select "Dev Containers: Reopen in Container"
+   - Wait for the container to build (~4 minutes first time)
+
+3. **Start Developing**
+   - All dependencies are pre-installed (Rust, cargo-pgrx, PostgreSQL 17, protobuf)
+   - Cargo cache volumes ensure fast rebuilds
+   - Run `cargo pgrx run` to build and test
+
+### Option 2: Manual Setup
 
 - Install pgrx on your machine `cargo install --locked cargo-pgrx --version 0.16.1`
 - Setup pgrx `cargo pgrx init`
