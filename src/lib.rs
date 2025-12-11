@@ -17,6 +17,7 @@ pub(crate) struct EtcdFdw {
     client: Client,
     rt: Runtime,
     fetch_results: Vec<KeyValue>,
+    tgt_cols: Vec<Column>,
     fetch_key: bool,
     fetch_value: bool,
 }
@@ -231,6 +232,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             client,
             rt,
             fetch_results,
+            tgt_cols: Vec::new(),
             fetch_key: false,
             fetch_value: false,
         })
@@ -434,6 +436,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         };
         let result_vec = result_unwrapped.take_kvs();
         self.fetch_results = result_vec;
+        self.tgt_cols = columns.to_vec();
         Ok(())
     }
 
@@ -448,11 +451,13 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 let value = x
                     .value_str()
                     .expect("Expected a value, but the value was empty");
-                if self.fetch_key {
-                    row.push("key", Some(Cell::String(key.to_string())));
-                }
-                if self.fetch_value {
-                    row.push("value", Some(Cell::String(value.to_string())));
+                for tgt_col in &self.tgt_cols {
+                    if tgt_col.name == "key" {
+                        row.push(&tgt_col.name, Some(Cell::String(key.to_string())));
+                    }
+                    if tgt_col.name == "value" {
+                        row.push(&tgt_col.name, Some(Cell::String(value.to_string())));
+                    }
                 }
             }))
         }
