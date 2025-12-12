@@ -1,28 +1,32 @@
 {
-    "name": "rust-dev",
+    "name": "etcd_fdw Development",
     "build": {
-        "dockerfile": "Dockerfile"
+        "dockerfile": "Dockerfile",
+        "context": "."
     },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "vadimcn.vscode-lldb",
+                "mk12.better-git-line-blame"
+            ],
+            "settings": {
+                "rust-analyzer.cargo.features": "all",
+                "rust-analyzer.check.command": "clippy"
+            }
+        }
+    },
+    "mounts": [
+        "source=etcd-fdw-cargo-cache,target=/home/vscode/.cargo/registry,type=volume"
+    ],
+    "postCreateCommand": "cargo pgrx init --pg17 download && cargo build",
+    "remoteUser": "vscode",
     "features": {
         "ghcr.io/devcontainers/features/common-utils:2": {},
         "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
         "ghcr.io/devcontainers/features/git:1": {},
         "ghcr.io/devcontainers/features/github-cli:1": {}
-    },
-    "customizations": {
-        "vscode": {
-            "settings": {
-                "terminal.integrated.shell.linux": "/bin/bash"
-            },            
-            "extensions": [
-                "rust-lang.rust-analyzer",
-                "fill-labs.dependi",
-                "mk12.better-git-line-blame"
-            ]
-        }
-    },
-    "remoteUser": "vscode",
-    "mounts": [
-        "source=cargo-registry,target=/usr/local/cargo/registry,type=volume"
-    ]
+    }
 }
