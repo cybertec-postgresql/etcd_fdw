@@ -26,7 +26,7 @@ pub struct EtcdConfig {
     pub ca_cert_path: Option<String>,
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
-    pub username: Option<String>,
+    pub user: Option<String>,
     pub password: Option<String>,
     pub servername: Option<String>,
     pub connect_timeout: Duration,
@@ -40,7 +40,7 @@ impl Default for EtcdConfig {
             ca_cert_path: None,
             client_cert_path: None,
             client_key_path: None,
-            username: None,
+            user: None,
             password: None,
             servername: None,
             connect_timeout: Duration::from_secs(10),
@@ -66,7 +66,7 @@ pub enum EtcdFdwError {
     #[error("KeyFile and CertFile must both be present.")]
     CertKeyMismatch(()),
 
-    #[error("Username and Password must both be specified.")]
+    #[error("User and Password must both be specified.")]
     UserPassMismatch(()),
 
     #[error("Column {0} is not contained in the input dataset")]
@@ -101,7 +101,7 @@ impl From<EtcdFdwError> for ErrorReport {
 }
 
 /// Check whether dependent options exits
-/// i.e username & pass, cert & key
+/// i.e user & pass, cert & key
 fn require_pair(
     a: bool,
     b: bool,
@@ -167,8 +167,8 @@ pub async fn connect_etcd(config: EtcdConfig) -> Result<Client, Error> {
         connect_options = connect_options.with_tls(tls_options);
     }
 
-    // Load Username and Password
-    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+    // Load User and Password
+    if let (Some(user), Some(pass)) = (&config.user, &config.password) {
         connect_options = connect_options.with_user(user, pass);
     }
 
@@ -192,7 +192,6 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             None => return Err(EtcdFdwError::NoConnStr(())),
         };
 
-        // TODO: username & pass should be captured separately i.e. from CREATE USER MAPPING
         let cacert_path = server.options.get("ssl_ca").cloned();
         let cert_path = server.options.get("ssl_cert").cloned();
         let key_path  = server.options.get("ssl_key").cloned();
@@ -205,7 +204,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         // ssl_cert + ssl_key must be both present or both absent
         require_pair(cert_path.is_some(), key_path.is_some(), EtcdFdwError::CertKeyMismatch(()))?;
 
-        let mut username = None;
+        let mut user = None;
         let mut password = None;
 
         unsafe {
@@ -229,7 +228,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                     });
                     if let (Ok(name), Ok(value)) = (name, value) {
                         match name {
-                            "username" => username = Some(value.to_string()),
+                            "user" => user = Some(value.to_string()),
                             "password" => password = Some(value.to_string()),
                             _ => {}
                         }
@@ -243,7 +242,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             ca_cert_path: cacert_path,
             client_cert_path: cert_path,
             client_key_path: key_path,
-            username: username,
+            user: user,
             password: password,
             servername: servername,
             connect_timeout: connect_timeout,
@@ -659,10 +658,10 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                     return Err(EtcdFdwError::ConflictingPrefixAndKey);
                 }
             } else if oid == pg_sys::BuiltinOid::UserMappingRelationId.value() {
-                let username_exists = check_options_contain(&options, "username").is_ok();
+                let user_exists = check_options_contain(&options, "user").is_ok();
                 let password_exists = check_options_contain(&options, "password").is_ok();
 
-                require_pair(username_exists, password_exists, EtcdFdwError::UserPassMismatch(()))?;
+                require_pair(user_exists, password_exists, EtcdFdwError::UserPassMismatch(()))?;
             }
         }
 

@@ -189,7 +189,7 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
 
 - **user** as *string*, required, no default
 
-  Username to use when connecting to etcd.
+  User to use when connecting to etcd.
 
 - **password** as *string*, required, no default
 
