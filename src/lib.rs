@@ -197,17 +197,46 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         let cert_path = server.options.get("ssl_cert").cloned();
         let key_path  = server.options.get("ssl_key").cloned();
         let servername  = server.options.get("ssl_servername").cloned();
-        let username = server.options.get("username").cloned();
-        let password  = server.options.get("password").cloned();
 
         // Parse timeouts with defaults
         let connect_timeout = parse_timeout(&server.options, "connect_timeout", config.connect_timeout)?;
         let request_timeout = parse_timeout(&server.options, "request_timeout", config.request_timeout)?;
 
         // ssl_cert + ssl_key must be both present or both absent
-        // username + password must be both present or both absent
         require_pair(cert_path.is_some(), key_path.is_some(), EtcdFdwError::CertKeyMismatch(()))?;
-        require_pair(username.is_some(), password.is_some(), EtcdFdwError::UserPassMismatch(()))?;
+
+        let mut username = None;
+        let mut password = None;
+
+        unsafe {
+            let usermapping =  pg_sys::GetUserMapping(pg_sys::GetUserId(), server.server_oid);
+            let options = (*usermapping).options;
+            pgrx::memcx::current_context(|mcx| {
+                let list = pgrx::list::List::<*mut std::ffi::c_void>::downcast_ptr_in_memcx(options, mcx).unwrap();
+                for option in list.iter() {
+                    let option = *option as *mut pg_sys::DefElem;
+                    let name = std::ffi::CStr::from_ptr((*option).defname);
+                    let value = std::ffi::CStr::from_ptr(pg_sys::defGetString(option));
+                    let name = name.to_str().map_err(|_| {
+                        OptionsError::OptionNameIsInvalidUtf8(
+                            String::from_utf8_lossy(name.to_bytes()).to_string(),
+                        )
+                    });
+                    let value = value.to_str().map_err(|_| {
+                        OptionsError::OptionValueIsInvalidUtf8(
+                            String::from_utf8_lossy(value.to_bytes()).to_string(),
+                        )
+                    });
+                    if let (Ok(name), Ok(value)) = (name, value) {
+                        match name {
+                            "username" => username = Some(value.to_string()),
+                            "password" => password = Some(value.to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+            });
+        }
 
         config = EtcdConfig {
             endpoints: vec![connstr],
@@ -613,11 +642,8 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
 
                 let cacert_path_exists = check_options_contain(&options, "ssl_ca").is_ok();
                 let cert_path_exists = check_options_contain(&options, "ssl_cert").is_ok();
-                let username_exists = check_options_contain(&options, "username").is_ok();
-                let password_exists = check_options_contain(&options, "password").is_ok();
 
                 require_pair(cacert_path_exists, cert_path_exists, EtcdFdwError::CertKeyMismatch(()))?;
-                require_pair(username_exists, password_exists, EtcdFdwError::UserPassMismatch(()))?;
             } else if oid == FOREIGN_TABLE_RELATION_ID {
                 check_options_contain(&options, "rowid_column")?;
 
@@ -632,6 +658,11 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 if prefix_exists && key_exists {
                     return Err(EtcdFdwError::ConflictingPrefixAndKey);
                 }
+            } else if oid == pg_sys::BuiltinOid::UserMappingRelationId.value() {
+                let username_exists = check_options_contain(&options, "username").is_ok();
+                let password_exists = check_options_contain(&options, "password").is_ok();
+
+                require_pair(username_exists, password_exists, EtcdFdwError::UserPassMismatch(()))?;
             }
         }
 
