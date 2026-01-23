@@ -52,6 +52,10 @@ CREATE SERVER my_etcd_server foreign data wrapper etcd_fdw options (connstr '127
 ```
 
 ```sql
+CREATE USER MAPPING FOR CURRENT_USER SERVER my_etcd_server OPTIONS (user 'root', password 'secret');
+```
+
+```sql
 CREATE foreign table test (key text, value text) server my_etcd_server options(rowid_column 'key');
 ```
 
@@ -86,7 +90,7 @@ foreign server itself.
 `etcd_fdw` now also supports limit offset push-down. Wherever possible,
 perform LIMIT operations on the remote server.
 
-#### WHERE push-down
+### WHERE push-down
 
 `etcd_fdw` now supports WHERE clause push-down for simple key-based comparisons. Whenever possible, equality and range conditions are translated into etcd key scans, so filtering is done on the remote server.
 Currently supported operators: `=`, `>=`, `>`, `<=`, `<`, `BETWEEN`, and `LIKE 'prefix%'`.
@@ -98,7 +102,7 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
 
 `etcd_fdw` accepts the following options via the `CREATE SERVER` command:
 
-- **connstr** as *string*, requuired
+- **connstr** as *string*, required
 
   Connetion string for etcd server i.e. `127.0.0.1:2379`
 
@@ -121,14 +125,6 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
    The domain name to use for verifying the server’s TLS certificate during the handshake.
    This value must match the Common Name (CN) or one of the Subject Alternative Names (SANs) in the server’s certificate.
 
-- **username** as *string*, optional, no default
-
-  Username to use when connecting to etcd.
-
-- **password** as *string*, optional, no default
-
-  Password to authenticate to the etcd server with.
-
 - **connect_timeout** as *string*, optional, default = `10`
 
   Timeout in seconds for establishing the initial connection to the etcd server.
@@ -142,7 +138,7 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
 `etcd_fdw` accepts the following table-level options via the
 `CREATE FOREIGN TABLE` command.
 
-- **rowid_column** as *string*, mandatory, no default
+- **rowid_column** as *string*, required, no default
 
   Specifies which column should be treated as the unique row identifier.
   Usually set to key.
@@ -185,6 +181,19 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
 
   Serializable(`s`), Allows serving results from a local etcd member without cluster-wide consensus.
   Serializable reads are faster and lighter on the cluster, but may return stale data in some cases
+
+### CREATE USER MAPPING options
+
+`etcd_fdw` accepts the following user mapping options via the
+`CREATE USER MAPPING` command.
+
+- **user** as *string*, required, no default
+
+  Username to use when connecting to etcd.
+
+- **password** as *string*, required, no default
+
+  Password to authenticate to the etcd server with.
 
 ## What doesn't work
 
