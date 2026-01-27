@@ -688,6 +688,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use etcd_client::Permission;
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
@@ -701,6 +702,32 @@ mod tests {
         "--advertise-client-urls",
         "http://0.0.0.0:2379",
     ];
+
+    const ETCD_USER: &str = "root";
+    const ETCD_PASS: &str = "secret";
+
+    // Setup etcd root role/user and enable authentication
+    async fn etcd_auth_setup(endpoint: String) {
+        let mut client: Client = Client::connect([endpoint], None)
+            .await
+            .expect("connect etcd");
+
+        // add root user and role with full permissions
+        client.role_add("root").await.expect("add role");
+        client.role_grant_permission("root", Permission::read_write("/"))
+            .await
+            .expect("grant permission");
+
+        client.user_add(ETCD_USER, ETCD_PASS, None)
+            .await
+            .expect("add user");
+
+        client.user_grant_role(ETCD_USER, "root")
+            .await
+            .expect("grant role");
+
+        client.auth_enable().await.expect("enable auth");
+    }
 
     fn create_container() -> (Container<GenericImage>, String) {
         let container = GenericImage::new("quay.io/coreos/etcd", "v3.6.4")
@@ -723,6 +750,8 @@ mod tests {
             .expect("Exposed host port should be available");
 
         let url = format!("{}:{}", host, port);
+        let rt = tokio::runtime::Runtime::new().expect("Tokio runtime should be initialized");
+        rt.block_on(etcd_auth_setup(url.clone()));
         (container, url)
     }
 
@@ -738,6 +767,16 @@ mod tests {
             .as_str(),
         )
         .expect("Server should have been created");
+
+        // Create a user mapping
+        Spi::run(
+            format!(
+                "CREATE USER MAPPING FOR CURRENT_USER SERVER etcd_test_server options (user '{}', password '{}')",
+                ETCD_USER, ETCD_PASS
+            )
+            .as_str(),
+        )
+        .expect("User mapping should have been created");
 
         // Create a foreign table
         Spi::run("CREATE FOREIGN TABLE test (key text, value text) server etcd_test_server options (rowid_column 'key')").expect("Test table should have been created");
