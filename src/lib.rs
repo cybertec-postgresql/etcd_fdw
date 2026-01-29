@@ -688,7 +688,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use etcd_client::Permission;
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
@@ -712,12 +711,8 @@ mod tests {
             .await
             .expect("connect etcd");
 
-        // add root user and role with full permissions
+        // add root user and role
         client.role_add("root").await.expect("add role");
-        client.role_grant_permission("root", Permission::read_write("/"))
-            .await
-            .expect("grant permission");
-
         client.user_add(ETCD_USER, ETCD_PASS, None)
             .await
             .expect("add user");
