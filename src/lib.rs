@@ -688,6 +688,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use etcd_client::Permission;
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
@@ -892,5 +893,64 @@ mod tests {
             .expect("SELECT other row should work");
 
         assert_eq!(Some(format!("original_value")), query_result);
+    }
+
+    #[pg_test]
+    fn test_user_mapping_validation() {
+        let (_container, url) = create_container();
+
+        create_fdt(url.clone());
+
+        // Insert test data
+        Spi::run("INSERT INTO test (key, value) VALUES ('/gather', 'data')")
+            .expect("INSERT should work");
+
+        // Test 1: User mapping with invalid credentials (should fail)
+        Spi::run("ALTER USER MAPPING FOR CURRENT_USER SERVER etcd_test_server OPTIONS (SET password 'wrong_password');")
+            .expect("Alter user mapping should work");
+
+        let result = std::panic::catch_unwind(|| {
+            Spi::run("SELECT * FROM test;").expect("SELECT should work");
+        });
+
+        assert!(result.is_err(), "Expected SELECT to fail due to invalid user mapping");
+
+        // Setup: create a role and user with limited permissions in etcd
+        let rt = tokio::runtime::Runtime::new().expect("Tokio runtime should be initialized");
+        rt.block_on(
+            async {
+                let mut client: Client = Client::connect([url.clone()], Some(ConnectOptions::new().with_user(ETCD_USER, ETCD_PASS)))
+                    .await
+                    .expect("connect etcd");
+                client.role_add("rw_role").await.expect("add role");
+                // role with read and write permissions on keys starting with "/"
+                client.role_grant_permission("rw_role", Permission::with_from_key(Permission::read_write("/")))
+                    .await
+                    .expect("grant permission");
+                client.user_add("etcd_user", "secret", None)
+                    .await
+                    .expect("add user");
+                client.user_grant_role("etcd_user", "rw_role")
+                    .await
+                    .expect("grant role");
+            }
+        );
+
+        // Alter user mapping to use the new limited permissions user
+        Spi::run("ALTER USER MAPPING FOR CURRENT_USER SERVER etcd_test_server OPTIONS (SET user 'etcd_user', SET password 'secret');")
+            .expect("Alter user mapping should work");
+
+        // Test 2: Selecting a key outside of the user's permissions (should fail)
+        let invalid_result =  std::panic::catch_unwind(|| {
+            Spi::run("SELECT * FROM test;").expect("SELECT should work");
+        });
+
+        assert!(invalid_result.is_err(), "Expected SELECT to fail due to insufficient permissions");
+
+        // Test 3: Selecting a key within the user's permissions
+        let result = Spi::get_two::<String, String>("SELECT * FROM test WHERE key = '/gather'")
+            .expect("SELECT with proper permissions should work");
+
+        assert_eq!((Some(format!("/gather")), Some(format!("data"))), result);
     }
 }
