@@ -66,7 +66,7 @@ pub enum EtcdFdwError {
     #[error("KeyFile and CertFile must both be present.")]
     CertKeyMismatch(()),
 
-    #[error("User and Password must both be specified.")]
+    #[error("User and Password must both be specified through user mappings.")]
     UserPassMismatch(()),
 
     #[error("Column {0} is not contained in the input dataset")]
