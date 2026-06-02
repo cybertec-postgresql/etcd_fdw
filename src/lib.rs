@@ -214,17 +214,17 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 let list = pgrx::list::List::<*mut std::ffi::c_void>::downcast_ptr_in_memcx(options, mcx).unwrap();
                 for option in list.iter() {
                     let option = *option as *mut pg_sys::DefElem;
-                    let name = std::ffi::CStr::from_ptr((*option).defname);
-                    let value = std::ffi::CStr::from_ptr(pg_sys::defGetString(option));
-                    let name = name.to_str().map_err(|_| {
+                    let name_cstr = std::ffi::CStr::from_ptr((*option).defname);
+                    let value_cstr = std::ffi::CStr::from_ptr(pg_sys::defGetString(option));
+                    let name = name_cstr.to_str().map_err(|_| {
                         OptionsError::OptionNameIsInvalidUtf8(
-                            String::from_utf8_lossy(name.to_bytes()).to_string(),
+                            String::from_utf8_lossy(name_cstr.to_bytes()).to_string(),
                         )
                     });
-                    let value = value.to_str().map_err(|_| {
-                        OptionsError::OptionValueIsInvalidUtf8(
-                            String::from_utf8_lossy(value.to_bytes()).to_string(),
-                        )
+                    let value = value_cstr.to_str().map_err(|_| {
+                        OptionsError::OptionValueIsInvalidUtf8 {
+                            option_name: name_cstr.to_string_lossy().into_owned(),
+                        }
                     });
                     if let (Ok(name), Ok(value)) = (name, value) {
                         match name {
