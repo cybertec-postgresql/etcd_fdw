@@ -18,7 +18,10 @@ pg15 = ["pgrx/pg15", "pgrx-tests/pg15", "supabase-wrappers/pg15"]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16", "supabase-wrappers/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17", "supabase-wrappers/pg17"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18", "supabase-wrappers/pg18"]
-pg_test = []
+# `cargo pgrx test` builds the lib with `--features pg_test` (no cfg(test)), so
+# the integration-test module compiled in by this feature needs testcontainers
+# as a normal dependency. Gating it here keeps it out of release builds.
+pg_test = ["dep:testcontainers"]
 
 [dependencies]
 etcd-client = { version = "0.16", features = ["tls"] }
@@ -27,13 +30,13 @@ pgrx = {version="=0.16.1"}
 supabase-wrappers = { git="https://github.com/cybertec-postgresql/wrappers.git", branch="develop", default-features = false }
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["full"] }
-testcontainers = { version = "0.25.0", features = ["blocking"] }
-serde = { version = "1.0.226", features = ["derive"] }
+# Test-only and not built for release: enabled only by the `pg_test` feature
+# (for `cargo pgrx test`) and via dev-dependencies (for `cargo test`).
+testcontainers = { version = "0.25.0", features = ["blocking"], optional = true }
 
 [dev-dependencies]
 pgrx-tests = "=0.16.1"
 testcontainers = { version = "0.25.0", features = ["blocking"] }
-serde = { version = "1.0.226", features = ["derive"] }
 
 [profile.dev]
 panic = "unwind"
