@@ -1,4 +1,4 @@
-use etcd_client::{Client, ConnectOptions, TlsOptions, Identity, Certificate, Error, DeleteOptions, GetOptions, KeyValue, PutOptions, SortTarget, SortOrder};
+use etcd_client::{Client, ConnectOptions, TlsOptions, Identity, Certificate, Error, DeleteOptions, GetOptions, KeyValue, PutOptions, SortTarget, SortOrder, Txn, TxnOp, Compare, CompareOp};
 use std::time::Duration;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::PgSqlErrorCode;
@@ -23,6 +23,10 @@ pub(crate) struct EtcdFdw {
     fetch_results: Vec<KeyValue>,
     fetch_pos: usize,
     tgt_cols: Vec<Column>,
+    // TTL (in seconds) applied to keys written through a table that sets the
+    // `lease_ttl` option. Set in `begin_modify`, cleared in `end_modify`.
+    // `None` means writes are not attached to a lease.
+    lease_ttl: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -217,6 +221,25 @@ fn required_cell(row: &Row, col: &str) -> EtcdFdwResult<String> {
     }
 }
 
+/// Build `PutOptions` for a write. When `lease_ttl` is set, a fresh etcd lease
+/// of that many seconds is granted and attached, so the written key is removed
+/// automatically once the lease expires. When it is `None`, the returned
+/// options carry no lease and the key persists until explicitly deleted.
+fn grant_lease(
+    rt: &Runtime,
+    client: &mut Client,
+    lease_ttl: Option<i64>,
+) -> EtcdFdwResult<PutOptions> {
+    let mut opts = PutOptions::new();
+    if let Some(ttl) = lease_ttl {
+        let lease = rt
+            .block_on(client.lease_grant(ttl, None))
+            .map_err(|e| EtcdFdwError::UpdateError(e.to_string()))?;
+        opts = opts.with_lease(lease.id());
+    }
+    Ok(opts)
+}
+
 impl EtcdFdw {
     /// Establish the etcd connection on first use. Connecting lazily keeps
     /// `new()` cheap (it can run at planning time) and avoids opening a
@@ -336,6 +359,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             fetch_results: vec![],
             fetch_pos: 0,
             tgt_cols: Vec::new(),
+            lease_ttl: None,
         })
     }
 
@@ -579,9 +603,24 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
 
     fn begin_modify(
         &mut self,
-        _options: &std::collections::HashMap<String, String>,
+        options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
-        // This currently does nothing
+        // A table that sets `lease_ttl` attaches every key it writes to an etcd
+        // lease with that many seconds of time-to-live, so the keys expire
+        // automatically. If set, it must be a positive integer; if omitted,
+        // writes are not leased.
+        self.lease_ttl = match options.get("lease_ttl") {
+            None => None,
+            Some(v) => match v.parse::<i64>() {
+                Ok(ttl) if ttl > 0 => Some(ttl),
+                _ => {
+                    return Err(EtcdFdwError::InvalidOption(
+                        "lease_ttl".to_string(),
+                        v.clone(),
+                    ))
+                }
+            },
+        };
         Ok(())
     }
 
@@ -592,26 +631,23 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         let value = value_string.as_str();
 
         self.ensure_connected()?;
+        let lease_ttl = self.lease_ttl;
         let client = self
             .client
             .as_mut()
             .expect("client must be connected after ensure_connected");
 
-        // Reject duplicates: error if the key already exists.
-        match self.rt.block_on(client.get(key, None)) {
-            Ok(x) => {
-                if x.kvs().iter().any(|kv| kv.key() == key.as_bytes()) {
-                    return Err(EtcdFdwError::KeyAlreadyExists(key.to_string()));
-                }
-            }
-            Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
-        }
+        let put_options = grant_lease(&self.rt, client, lease_ttl)?;
 
-        match self
-            .rt
-            .block_on(client.put(key, value, Some(PutOptions::new())))
-        {
-            Ok(_) => Ok(()),
+        // Atomic put-if-absent: the transaction only puts when the key's version
+        // is 0 (the key does not exist), so two concurrent inserts of the same
+        // key cannot both succeed.
+        let txn = Txn::new()
+            .when([Compare::version(key, CompareOp::Equal, 0)])
+            .and_then([TxnOp::put(key, value, Some(put_options))]);
+        match self.rt.block_on(client.txn(txn)) {
+            Ok(resp) if resp.succeeded() => Ok(()),
+            Ok(_) => Err(EtcdFdwError::KeyAlreadyExists(key.to_string())),
             Err(e) => Err(EtcdFdwError::UpdateError(e.to_string())),
         }
     }
@@ -624,23 +660,23 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         let value = value_string.as_str();
 
         self.ensure_connected()?;
+        let lease_ttl = self.lease_ttl;
         let client = self
             .client
             .as_mut()
             .expect("client must be connected after ensure_connected");
 
-        // The key must already exist; an exact `get` returns it or nothing.
-        match self.rt.block_on(client.get(key, None)) {
-            Ok(x) => {
-                if !x.kvs().iter().any(|kv| kv.key() == key.as_bytes()) {
-                    return Err(EtcdFdwError::KeyDoesntExist(key.to_string()));
-                }
-            }
-            Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
-        }
+        let put_options = grant_lease(&self.rt, client, lease_ttl)?;
 
-        match self.rt.block_on(client.put(key, value, None)) {
-            Ok(_) => Ok(()),
+        // Atomic put-if-present: the transaction only writes when the key's
+        // version is greater than 0 (the key exists), so a concurrently deleted
+        // key is reported as missing rather than being silently re-created.
+        let txn = Txn::new()
+            .when([Compare::version(key, CompareOp::Greater, 0)])
+            .and_then([TxnOp::put(key, value, Some(put_options))]);
+        match self.rt.block_on(client.txn(txn)) {
+            Ok(resp) if resp.succeeded() => Ok(()),
+            Ok(_) => Err(EtcdFdwError::KeyDoesntExist(key.to_string())),
             Err(e) => Err(EtcdFdwError::UpdateError(e.to_string())),
         }
     }
@@ -655,28 +691,15 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             .as_mut()
             .expect("client must be connected after ensure_connected");
 
-        match self.rt.block_on(client.get(key, None)) {
-            Ok(x) => {
-                if !x.kvs().iter().any(|kv| kv.key() == key.as_bytes()) {
-                    return Err(EtcdFdwError::KeyDoesntExist(key.to_string()));
-                }
-            }
-            Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
-        }
-
-        match self
-            .rt
-            .block_on(client.delete(key, Some(DeleteOptions::new())))
-        {
-            Ok(x) => {
-                if x.deleted() == 0 {
-                    return Err(EtcdFdwError::UpdateError(format!(
-                        "Deletion seemingly successful, but deleted count is {}",
-                        x.deleted()
-                    )));
-                }
-                Ok(())
-            }
+        // Atomic delete-if-present: the transaction only deletes when the key's
+        // version is greater than 0 (the key exists), so deleting a missing key
+        // is reported rather than silently reported as success.
+        let txn = Txn::new()
+            .when([Compare::version(key, CompareOp::Greater, 0)])
+            .and_then([TxnOp::delete(key, Some(DeleteOptions::new()))]);
+        match self.rt.block_on(client.txn(txn)) {
+            Ok(resp) if resp.succeeded() => Ok(()),
+            Ok(_) => Err(EtcdFdwError::KeyDoesntExist(key.to_string())),
             Err(e) => Err(EtcdFdwError::UpdateError(e.to_string())),
         }
     }
@@ -693,7 +716,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     // }
 
     fn end_modify(&mut self) -> Result<(), EtcdFdwError> {
-        // This currently also does nothing
+        self.lease_ttl = None;
         Ok(())
     }
 
@@ -1073,6 +1096,91 @@ mod tests {
         assert_eq!(
             (Some("o'clock".to_string()), Some("'quoted'".to_string())),
             row
+        );
+    }
+
+    // Transactions: a second insert of the same key is rejected by the atomic
+    // put-if-absent transaction, and the original value is left untouched.
+    #[pg_test]
+    fn test_insert_duplicate_key_rejected() {
+        let (_container, url) = create_container();
+        create_fdt(url);
+
+        Spi::run("INSERT INTO test (key, value) VALUES ('dup','first')")
+            .expect("first INSERT should work");
+
+        let second = std::panic::catch_unwind(|| {
+            Spi::run("INSERT INTO test (key, value) VALUES ('dup','second')")
+                .expect("second INSERT");
+        });
+        assert!(second.is_err(), "inserting a duplicate key should be rejected");
+
+        let v = Spi::get_one::<String>("SELECT value FROM test WHERE key='dup'")
+            .expect("SELECT should work");
+        assert_eq!(Some("first".to_string()), v);
+    }
+
+    // Leases: a key written through a table with `lease_ttl` carries a non-zero
+    // etcd lease id (verified directly against etcd).
+    #[pg_test]
+    fn test_lease_attaches_to_key() {
+        let (_container, url) = create_container();
+        create_fdt(url.clone());
+
+        Spi::run("CREATE FOREIGN TABLE leased (key text, value text) server etcd_test_server options (rowid_column 'key', lease_ttl '30')")
+            .expect("leased table should have been created");
+        Spi::run("INSERT INTO leased (key, value) VALUES ('lk','lv')")
+            .expect("INSERT should work");
+
+        let rt = tokio::runtime::Runtime::new().expect("Tokio runtime should be initialized");
+        let lease_id = rt.block_on(async {
+            let mut c = Client::connect(
+                [url.clone()],
+                Some(ConnectOptions::new().with_user(ETCD_USER, ETCD_PASS)),
+            )
+            .await
+            .expect("connect etcd");
+            let resp = c.get("lk", None).await.expect("get");
+            resp.kvs().first().expect("key should be present").lease()
+        });
+
+        assert_ne!(
+            0, lease_id,
+            "a key written through a lease_ttl table must have a lease attached"
+        );
+    }
+
+    // Leases: a key written with a short `lease_ttl` is removed automatically
+    // once the lease expires.
+    #[pg_test]
+    fn test_lease_key_expires() {
+        let (_container, url) = create_container();
+        create_fdt(url);
+
+        Spi::run("CREATE FOREIGN TABLE ephemeral (key text, value text) server etcd_test_server options (rowid_column 'key', lease_ttl '2')")
+            .expect("ephemeral table should have been created");
+        Spi::run("INSERT INTO ephemeral (key, value) VALUES ('ek','ev')")
+            .expect("INSERT should work");
+
+        let present = Spi::get_one::<String>("SELECT value FROM ephemeral WHERE key='ek'")
+            .expect("SELECT should work");
+        assert_eq!(Some("ev".to_string()), present);
+
+        // Poll for deletion to tolerate etcd's lease-expiry granularity.
+        let mut gone = false;
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_secs(1));
+            let still_there =
+                Spi::get_one::<String>("SELECT value FROM ephemeral WHERE key='ek'")
+                    .unwrap_or(None);
+            if still_there.is_none() {
+                gone = true;
+                break;
+            }
+        }
+        assert!(
+            gone,
+            "a key written with lease_ttl '2' must expire and be removed"
         );
     }
 }

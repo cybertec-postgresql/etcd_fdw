@@ -182,6 +182,14 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
   Serializable(`s`), Allows serving results from a local etcd member without cluster-wide consensus.
   Serializable reads are faster and lighter on the cluster, but may return stale data in some cases
 
+- **lease_ttl** as *string*, optional, no default
+
+  If set to a positive integer N, keys written through this table (by `INSERT`
+  or `UPDATE`) are attached to an etcd lease with a time-to-live of N seconds.
+  etcd removes the key automatically once the lease expires, so a key lives for
+  at most N seconds after it was last written. If omitted, keys are written
+  without a lease and persist until explicitly deleted.
+
 ### CREATE USER MAPPING options
 
 `etcd_fdw` accepts the following user mapping options via the
@@ -194,6 +202,14 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
 - **password** as *string*, required, no default
 
   Password to authenticate to the etcd server with.
+
+## Atomic writes
+
+`INSERT`, `UPDATE`, and `DELETE` are each executed as a single etcd transaction
+(compare-and-swap): `INSERT` only writes when the key does not already exist,
+while `UPDATE` and `DELETE` only act when the key exists. Each row operation is
+therefore atomic on the etcd side, which also prevents two concurrent inserts of
+the same key from both succeeding.
 
 ## What doesn't work
 
