@@ -104,7 +104,11 @@ This behavior is consistent with the prefix, range_end, and key options in `CREA
 
 - **connstr** as *string*, required
 
-  Connetion string for etcd server i.e. `127.0.0.1:2379`
+  Connection string for the etcd server, i.e. `127.0.0.1:2379`.
+
+  Multiple endpoints of an etcd cluster may be given as a comma-separated
+  list, i.e. `10.0.0.1:2379,10.0.0.2:2379,10.0.0.3:2379`. A single endpoint
+  (no comma) behaves exactly as before.
 
 - **ssl_key** as *string*, optional, no default
 

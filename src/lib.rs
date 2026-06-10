@@ -140,7 +140,19 @@ fn parse_timeout(
     }
 }
 
-
+/// Parse the `connstr` server option into a list of etcd endpoints.
+///
+/// A single endpoint (no comma) yields a one-element list, preserving the
+/// original single-host configuration. Comma-separated values yield multiple
+/// endpoints; surrounding whitespace is trimmed and empty entries are dropped.
+fn parse_endpoints(connstr: &str) -> Vec<String> {
+    connstr
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
 
 /// Use this to connect to etcd.
 /// Parse the certs/key paths and read them as bytes
@@ -235,11 +247,17 @@ impl EtcdFdw {
 
 impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     fn new(server: ForeignServer) -> EtcdFdwResult<EtcdFdw> {
-        // Connection string for the etcd server (required).
+        // Connection string for the etcd server (required). It may list several
+        // comma-separated endpoints (e.g. '10.0.0.1:2379,10.0.0.2:2379'); a
+        // single endpoint keeps the original behavior.
         let connstr = match server.options.get("connstr") {
             Some(x) => x.clone(),
             None => return Err(EtcdFdwError::NoConnStr(())),
         };
+        let endpoints = parse_endpoints(&connstr);
+        if endpoints.is_empty() {
+            return Err(EtcdFdwError::NoConnStr(()));
+        }
 
         let cacert_path = server.options.get("ssl_ca").cloned();
         let cert_path = server.options.get("ssl_cert").cloned();
@@ -305,7 +323,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         }
 
         let config = EtcdConfig {
-            endpoints: vec![connstr],
+            endpoints,
             ca_cert_path: cacert_path,
             client_cert_path: cert_path,
             client_key_path: key_path,
@@ -1073,6 +1091,55 @@ mod tests {
         assert_eq!(
             (Some("o'clock".to_string()), Some("'quoted'".to_string())),
             row
+        );
+    }
+
+    // Multiple etcd endpoints: a comma-separated connstr must connect and work.
+    // The same reachable endpoint is listed twice so the multi-endpoint path is
+    // exercised deterministically without needing a real cluster. (Every other
+    // test uses a single endpoint, which confirms the old config still works.)
+    #[pg_test]
+    fn test_multiple_endpoints() {
+        let (_container, url) = create_container();
+        create_fdt(format!("{},{}", url, url));
+
+        Spi::run("INSERT INTO test (key, value) VALUES ('foo','bar')")
+            .expect("INSERT should work");
+        let value = Spi::get_one::<String>("SELECT value FROM test WHERE key='foo'")
+            .expect("SELECT should work");
+        assert_eq!(Some("bar".to_string()), value);
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::parse_endpoints;
+
+    #[test]
+    fn single_endpoint_unchanged() {
+        assert_eq!(
+            parse_endpoints("127.0.0.1:2379"),
+            vec!["127.0.0.1:2379".to_string()]
+        );
+    }
+
+    #[test]
+    fn multiple_endpoints_split() {
+        assert_eq!(
+            parse_endpoints("10.0.0.1:2379,10.0.0.2:2379,10.0.0.3:2379"),
+            vec![
+                "10.0.0.1:2379".to_string(),
+                "10.0.0.2:2379".to_string(),
+                "10.0.0.3:2379".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn trims_whitespace_and_drops_empty_entries() {
+        assert_eq!(
+            parse_endpoints(" a:1 , , b:2 ,"),
+            vec!["a:1".to_string(), "b:2".to_string()]
         );
     }
 }
