@@ -21,22 +21,28 @@ pg18 = ["pgrx/pg18", "pgrx-tests/pg18", "supabase-wrappers/pg18"]
 # `cargo pgrx test` builds the lib with `--features pg_test` (no cfg(test)), so
 # the integration-test module compiled in by this feature needs testcontainers
 # as a normal dependency. Gating it here keeps it out of release builds.
-pg_test = ["dep:testcontainers"]
+pg_test = ["dep:testcontainers", "dep:etcd-client", "dep:tokio"]
 
 [dependencies]
-etcd-client = { version = "0.16", features = ["tls"] }
-futures = "0.3.31"
+base64 = "0.22"
+etcd_client_sync = { path = "etcd_client" }
 pgrx = {version="=0.16.1"}
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 supabase-wrappers = { git="https://github.com/cybertec-postgresql/wrappers.git", branch="develop", default-features = false }
 thiserror = "2.0.16"
-tokio = { version = "1.47.1", features = ["full"] }
+ureq = { version = "2.9", features = ["tls", "native-certs", "json"] }
 # Test-only and not built for release: enabled only by the `pg_test` feature
 # (for `cargo pgrx test`) and via dev-dependencies (for `cargo test`).
 testcontainers = { version = "0.25.0", features = ["blocking"], optional = true }
+etcd-client = { version = "0.16", features = ["tls"], optional = true }
+tokio = { version = "1.47.1", features = ["full"], optional = true }
 
 [dev-dependencies]
+etcd-client = { version = "0.16", features = ["tls"] }
 pgrx-tests = "=0.16.1"
 testcontainers = { version = "0.25.0", features = ["blocking"] }
+tokio = { version = "1.47.1", features = ["full"] }
 
 [profile.dev]
 panic = "unwind"
