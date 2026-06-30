@@ -20,6 +20,13 @@ pub(crate) struct EtcdFdw {
     fetch_results: Vec<EtcdKeyValue>,
     fetch_pos: usize,
     tgt_cols: Vec<Column>,
+    /// Exact-match key from a pushed-down `WHERE key = $1` qual.
+    ///
+    /// `iter_scan` uses this to skip rows whose key doesn't match, so a missed
+    /// pushdown (e.g. NULL outer value, an unsupported cell variant in the
+    /// bound param, or stale `fetch_results` from a previous rescan) cannot
+    /// leak unrelated rows into the join output.
+    pushed_eq_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -181,6 +188,33 @@ fn required_cell(row: &Row, col: &str) -> EtcdFdwResult<String> {
     }
 }
 
+/// Extract a bound parameter value from a `Qual` as text, preferring the
+/// framework-managed `param.eval_value` over the static `qual.value`.
+///
+/// For quals backed by a `Param` (typically nested-loop join parameters), the
+/// plan-time `qual.value` is a type-blind dummy (`Cell::I64(0)`) that is only
+/// overwritten by `assign_parameter_value` on successful conversion. If the
+/// outer value is NULL, or `Cell::from_polymorphic_datum` cannot materialise
+/// it, the framework leaves `qual.value` untouched and that dummy survives --
+/// producing the wrong pushdown key (and random-looking join output).
+/// `param.eval_value`, by contrast, is updated every iteration to `Some(...)`
+/// on success or `None` on failure/NULL, so it always reflects the truth.
+///
+/// `cell_to_text` is reused so any scalar `Cell` variant (numeric, bool, ...)
+/// becomes a usable string key.
+fn qual_bound_value(q: &Qual) -> Option<String> {
+    if let Some(p) = q.param.as_ref() {
+        return match p.eval_value.lock().ok()?.as_ref() {
+            Some(Value::Cell(c)) => Some(cell_to_text(c)),
+            _ => None,
+        };
+    }
+    match &q.value {
+        Value::Cell(c) => Some(cell_to_text(c)),
+        _ => None,
+    }
+}
+
 impl EtcdFdw {
     /// Establish the etcd connection on first use.
     fn ensure_connected(&mut self) -> EtcdFdwResult<()> {
@@ -285,6 +319,7 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             fetch_results: vec![],
             fetch_pos: 0,
             tgt_cols: Vec::new(),
+            pushed_eq_key: None,
         })
     }
 
@@ -296,6 +331,15 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         limit: &Option<Limit>,
         options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
+        // Reset scan state up front so begin_scan is idempotent and re-entrant:
+        // a partial prior scan that errored before end_scan, or any future
+        // framework change that skips end_scan, can't leak results or
+        // pushed-down qual metadata into the new scan.
+        self.fetch_results.clear();
+        self.fetch_pos = 0;
+        self.tgt_cols.clear();
+        self.pushed_eq_key = None;
+
         // parse the options defined when `CREATE FOREIGN TABLE`
         let prefix = options.get("prefix").cloned();
         let range_end = options.get("range_end").cloned();
@@ -340,17 +384,25 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 continue;
             }
 
-            // extract string value
-            let v = match &q.value {
-                Value::Cell(Cell::String(s)) => s.clone(),
-                _ => continue,
+            // Extract the bound value as text. `qual_bound_value` accepts any
+            // Cell variant (not just String) and prefers `param.eval_value`
+            // over `qual.value`, so it sees the actual outer-join value
+            // rather than the plan-time dummy for Param-backed quals.
+            let Some(v) = qual_bound_value(q) else {
+                continue;
             };
 
             match q.operator.as_str() {
                 "=" => {
                     // equal: start at v, end at v+"\0"
                     qual_key_start = Some(v.clone());
-                    qual_range_end = Some(format!("{}\0", v));
+                    qual_range_end = Some(format!("{}\0", &v));
+                    // Remember the expected key so iter_scan can verify every
+                    // emitted row matches it -- a safety net for cases where
+                    // pushdown silently fails (NULL outer value, unconvertible
+                    // datum, etc.) and would otherwise leak unrelated rows
+                    // into the join output.
+                    self.pushed_eq_key = Some(v);
                 }
                 ">=" => {
                     // greater or equal: start at v
@@ -503,27 +555,46 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     fn iter_scan(&mut self, row: &mut Row) -> EtcdFdwResult<Option<()>> {
         // Walk the buffered results with a cursor. Draining the front of the
         // vector on every call would be O(n) per row, i.e. O(n^2) per scan.
-        if self.fetch_pos >= self.fetch_results.len() {
-            return Ok(None);
-        }
-
-        let kv = &self.fetch_results[self.fetch_pos];
-        // etcd keys/values are arbitrary bytes; replace any invalid UTF-8
-        // instead of panicking, since the columns are exposed as `text`.
-        let key = String::from_utf8_lossy(kv.key()).into_owned();
-        let value = String::from_utf8_lossy(kv.value()).into_owned();
-        self.fetch_pos += 1;
-
-        for tgt_col in &self.tgt_cols {
-            if tgt_col.name == "key" {
-                row.push(&tgt_col.name, Some(Cell::String(key.clone())));
+        //
+        // If an exact-match key was pushed down, skip rows whose key doesn't
+        // match -- this guards against any failure mode where begin_scan
+        // couldn't honor the qual (NULL outer value, unconvertible datum,
+        // stale fetch_results, ...) and would otherwise leak unrelated rows
+        // into the join output.
+        loop {
+            if self.fetch_pos >= self.fetch_results.len() {
+                return Ok(None);
             }
-            if tgt_col.name == "value" {
-                row.push(&tgt_col.name, Some(Cell::String(value.clone())));
-            }
-        }
 
-        Ok(Some(()))
+            let kv = &self.fetch_results[self.fetch_pos];
+            // etcd keys/values are arbitrary bytes; replace any invalid UTF-8
+            // instead of panicking, since the columns are exposed as `text`.
+            let key = String::from_utf8_lossy(kv.key()).into_owned();
+            let value = String::from_utf8_lossy(kv.value()).into_owned();
+            self.fetch_pos += 1;
+
+            if let Some(expected) = &self.pushed_eq_key {
+                if &key != expected {
+                    continue;
+                }
+            }
+
+            for tgt_col in &self.tgt_cols {
+                if tgt_col.name == "key" {
+                    row.push(&tgt_col.name, Some(Cell::String(key.clone())));
+                }
+                if tgt_col.name == "value" {
+                    row.push(&tgt_col.name, Some(Cell::String(value.clone())));
+                }
+            }
+
+            return Ok(Some(()));
+        }
+    }
+
+    fn re_scan(&mut self) -> EtcdFdwResult<()> {
+        self.fetch_pos = 0;
+        Ok(())
     }
 
     fn end_scan(&mut self) -> EtcdFdwResult<()> {
@@ -1040,6 +1111,65 @@ mod tests {
         assert_eq!(
             (Some("o'clock".to_string()), Some("'quoted'".to_string())),
             row
+        );
+    }
+
+    #[pg_test]
+    fn test_join() {
+        let (_container, url) = create_container();
+        create_fdt(url);
+
+        // Seed etcd-backed foreign table with three key/value pairs.
+        Spi::run(
+            "INSERT INTO test (key, value) VALUES
+                ('foo', 'bar'),
+                ('bar', 'baz'),
+                ('qux', 'quux')",
+        )
+        .expect("INSERT should work");
+
+        // Driving relation holds the keys we want to look up. Two rows share
+        // a key ('foo') to exercise the rescan-with-same-param-value path;
+        // one row ('bar') triggers a rescan with a different param value.
+        Spi::run("CREATE TABLE test_join (id SERIAL PRIMARY KEY, key varchar(255))")
+            .expect("CREATE TABLE should work");
+        Spi::run("INSERT INTO test_join (key) VALUES ('foo'), ('foo'), ('bar')")
+            .expect("INSERT test_join should work");
+
+        // Before the join fix, begin_scan silently dropped any Qual whose
+        // value wasn't a `Cell::String`, did a full keyspace scan on each
+        // rescan, and emitted whatever etcd happened to return. The join
+        // either produced a cartesian-product mess or matched the wrong
+        // (key, value) to each outer row. With the fix the inner side is
+        // pushed down to a point lookup on `key`, so each outer row
+        // matches exactly the corresponding etcd row.
+        let rows: Vec<(Option<i32>, Option<String>, Option<String>)> = Spi::connect_mut(|c| {
+            c.update(
+                "SELECT tj.id, fd.key, fd.value
+                 FROM test_join tj
+                 JOIN test fd ON tj.key = fd.key
+                 ORDER BY tj.id",
+                None,
+                &[],
+            )
+            .expect("SELECT join should work")
+            .map(|row| {
+                (
+                    row.get::<i32>(1).expect("id datum"),
+                    row.get::<String>(2).expect("key datum"),
+                    row.get::<String>(3).expect("value datum"),
+                )
+            })
+            .collect()
+        });
+
+        assert_eq!(
+            vec![
+                (Some(1), Some("foo".to_string()), Some("bar".to_string())),
+                (Some(2), Some("foo".to_string()), Some("bar".to_string())),
+                (Some(3), Some("bar".to_string()), Some("baz".to_string())),
+            ],
+            rows
         );
     }
 }
