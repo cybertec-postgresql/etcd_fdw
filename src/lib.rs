@@ -19,7 +19,7 @@ pub(crate) struct EtcdFdw {
     config: EtcdConfig,
     fetch_results: Vec<EtcdKeyValue>,
     fetch_pos: usize,
-    tgt_cols: Vec<Column>,
+    tgt_cols: Vec<String>,
     /// Exact-match key from a pushed-down `WHERE key = $1` qual.
     ///
     /// `iter_scan` uses this to skip rows whose key doesn't match, so a missed
@@ -548,7 +548,10 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
         };
         self.fetch_pos = 0;
-        self.tgt_cols = columns.to_vec();
+        self.tgt_cols.clear();
+        for c in columns {
+            self.tgt_cols.push(c.name.clone());
+        }
         Ok(())
     }
 
@@ -580,11 +583,11 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             }
 
             for tgt_col in &self.tgt_cols {
-                if tgt_col.name == "key" {
-                    row.push(&tgt_col.name, Some(Cell::String(key.clone())));
+                if tgt_col == "key" {
+                    row.push(&tgt_col, Some(Cell::String(key.clone())));
                 }
-                if tgt_col.name == "value" {
-                    row.push(&tgt_col.name, Some(Cell::String(value.clone())));
+                if tgt_col == "value" {
+                    row.push(&tgt_col, Some(Cell::String(value.clone())));
                 }
             }
 
@@ -600,6 +603,8 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
     fn end_scan(&mut self) -> EtcdFdwResult<()> {
         self.fetch_results = vec![];
         self.fetch_pos = 0;
+        self.tgt_cols.clear();
+        self.pushed_eq_key = None;
         Ok(())
     }
 
