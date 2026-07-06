@@ -1,10 +1,11 @@
-use etcd_client::{Client, ConnectOptions, TlsOptions, Identity, Certificate, Error, DeleteOptions, GetOptions, KeyValue, PutOptions, SortTarget, SortOrder};
-use std::time::Duration;
 use pgrx::pg_sys::panic::ErrorReport;
 use pgrx::PgSqlErrorCode;
 use pgrx::*;
+use std::time::Duration;
 use supabase_wrappers::prelude::*;
 use thiserror::Error;
+
+use etcd_client_sync::{EtcdHttpClient, EtcdKeyValue, RangeOptions};
 
 pgrx::pg_module_magic!();
 
@@ -14,15 +15,18 @@ pgrx::pg_module_magic!();
     error_type = "EtcdFdwError"
 )]
 pub(crate) struct EtcdFdw {
-    // `client` is declared before `rt` so that it is dropped first: the etcd
-    // client's background work can wind down while its runtime is still alive.
-    // The connection is established lazily (see `ensure_connected`).
-    client: Option<Client>,
-    rt: Runtime,
+    client: Option<EtcdHttpClient>,
     config: EtcdConfig,
-    fetch_results: Vec<KeyValue>,
+    fetch_results: Vec<EtcdKeyValue>,
     fetch_pos: usize,
-    tgt_cols: Vec<Column>,
+    tgt_cols: Vec<String>,
+    /// Exact-match key from a pushed-down `WHERE key = $1` qual.
+    ///
+    /// `iter_scan` uses this to skip rows whose key doesn't match, so a missed
+    /// pushdown (e.g. NULL outer value, an unsupported cell variant in the
+    /// bound param, or stale `fetch_results` from a previous rescan) cannot
+    /// leak unrelated rows into the join output.
+    pushed_eq_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -105,6 +109,12 @@ pub enum EtcdFdwError {
     OptionsError(#[from] OptionsError),
 }
 
+impl From<etcd_client_sync::EtcdError> for EtcdFdwError {
+    fn from(value: etcd_client_sync::EtcdError) -> Self {
+        EtcdFdwError::FetchError(value.to_string())
+    }
+}
+
 impl From<EtcdFdwError> for ErrorReport {
     fn from(value: EtcdFdwError) -> Self {
         ErrorReport::new(PgSqlErrorCode::ERRCODE_FDW_ERROR, format!("{}", value), "")
@@ -113,11 +123,7 @@ impl From<EtcdFdwError> for ErrorReport {
 
 /// Check whether dependent options exits
 /// i.e user & pass, cert & key
-fn require_pair(
-    a: bool,
-    b: bool,
-    err: EtcdFdwError,
-) -> Result<(), EtcdFdwError> {
+fn require_pair(a: bool, b: bool, err: EtcdFdwError) -> Result<(), EtcdFdwError> {
     match (a, b) {
         (true, false) | (false, true) => Err(err),
         _ => Ok(()),
@@ -140,53 +146,18 @@ fn parse_timeout(
     }
 }
 
-
-
-/// Use this to connect to etcd.
-/// Parse the certs/key paths and read them as bytes
-/// Sets the `TlsOptions` if available to support sll connection
-pub async fn connect_etcd(config: EtcdConfig) -> Result<Client, Error> {
-    let mut connect_options = ConnectOptions::new()
-        .with_connect_timeout(config.connect_timeout)
-        .with_timeout(config.request_timeout);
-
-    let use_tls = config.ca_cert_path.is_some() || config.client_cert_path.is_some();
-
-    if use_tls {
-        let mut tls_options = TlsOptions::new();
-
-        // Load CA cert if provided
-        if let Some(ca_path) = &config.ca_cert_path {
-            let ca_bytes = std::fs::read(ca_path).map_err(Error::IoError)?;
-            let ca_cert = Certificate::from_pem(ca_bytes);
-            tls_options = tls_options.ca_certificate(ca_cert);
-        }
-
-        // Load client cert and key if both provided
-        if let (Some(cert_path), Some(key_path)) = (&config.client_cert_path, &config.client_key_path) {
-            let cert_bytes = std::fs::read(cert_path).map_err(Error::IoError)?;
-            let key_bytes  = std::fs::read(key_path).map_err(Error::IoError)?;
-            let identity = Identity::from_pem(cert_bytes, key_bytes);
-            tls_options = tls_options.identity(identity);
-        }
-
-        // Load domain name if provided
-        if let Some(domain) = &config.servername {
-            tls_options = tls_options.domain_name(domain);
-        }
-
-        connect_options = connect_options.with_tls(tls_options);
-    }
-
-    // Load User and Password
-    if let (Some(user), Some(pass)) = (&config.user, &config.password) {
-        connect_options = connect_options.with_user(user, pass);
-    }
-
-    let endpoints: Vec<&str> = config.endpoints.iter().map(|s| s.as_str()).collect();
-    Client::connect(endpoints, Some(connect_options)).await
+/// Create a synchronous etcd HTTP client
+fn connect_etcd(config: EtcdConfig) -> EtcdFdwResult<EtcdHttpClient> {
+    // Use the first endpoint as the base URL for HTTP requests
+    let endpoint = config.endpoints.first().cloned().unwrap_or_default();
+    let client = EtcdHttpClient::new(endpoint, config.request_timeout);
+    let client = if let (Some(user), Some(pass)) = (config.user, config.password) {
+        client.with_auth(user, pass)
+    } else {
+        client
+    };
+    Ok(client)
 }
-
 
 type EtcdFdwResult<T> = std::result::Result<T, EtcdFdwError>;
 
@@ -217,15 +188,38 @@ fn required_cell(row: &Row, col: &str) -> EtcdFdwResult<String> {
     }
 }
 
+/// Extract a bound parameter value from a `Qual` as text, preferring the
+/// framework-managed `param.eval_value` over the static `qual.value`.
+///
+/// For quals backed by a `Param` (typically nested-loop join parameters), the
+/// plan-time `qual.value` is a type-blind dummy (`Cell::I64(0)`) that is only
+/// overwritten by `assign_parameter_value` on successful conversion. If the
+/// outer value is NULL, or `Cell::from_polymorphic_datum` cannot materialise
+/// it, the framework leaves `qual.value` untouched and that dummy survives --
+/// producing the wrong pushdown key (and random-looking join output).
+/// `param.eval_value`, by contrast, is updated every iteration to `Some(...)`
+/// on success or `None` on failure/NULL, so it always reflects the truth.
+///
+/// `cell_to_text` is reused so any scalar `Cell` variant (numeric, bool, ...)
+/// becomes a usable string key.
+fn qual_bound_value(q: &Qual) -> Option<String> {
+    if let Some(p) = q.param.as_ref() {
+        return match p.eval_value.lock().ok()?.as_ref() {
+            Some(Value::Cell(c)) => Some(cell_to_text(c)),
+            _ => None,
+        };
+    }
+    match &q.value {
+        Value::Cell(c) => Some(cell_to_text(c)),
+        _ => None,
+    }
+}
+
 impl EtcdFdw {
-    /// Establish the etcd connection on first use. Connecting lazily keeps
-    /// `new()` cheap (it can run at planning time) and avoids opening a
-    /// connection for statements that are planned but never executed.
+    /// Establish the etcd connection on first use.
     fn ensure_connected(&mut self) -> EtcdFdwResult<()> {
         if self.client.is_none() {
-            let client = self
-                .rt
-                .block_on(connect_etcd(self.config.clone()))
+            let client = connect_etcd(self.config.clone())
                 .map_err(|e| EtcdFdwError::ClientConnectionError(e.to_string()))?;
             self.client = Some(client);
         }
@@ -316,26 +310,16 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             request_timeout,
         };
 
-        // Use the framework's current-thread runtime helper. A Postgres backend
-        // is single-threaded and the FDW only ever `block_on`s, so there is no
-        // reason to spawn worker threads (one per CPU core, as the multi-threaded
-        // `Runtime::new()` does). Avoiding a worker pool means no background
-        // threads that could receive Postgres signals off the main thread, and
-        // none that could be leaked if a Postgres error unwinds through this
-        // struct. `create_async_runtime()` is exactly
-        // `Builder::new_current_thread().enable_all().build()`.
-        let rt = create_async_runtime().map_err(|e| EtcdFdwError::RuntimeInitError(e.to_string()))?;
-
         // The etcd connection is established lazily in `begin_scan` /
         // `begin_modify`: `new()` must stay cheap because the framework can call
         // it at planning time, possibly for a statement that is never executed.
         Ok(Self {
             client: None,
-            rt,
             config,
             fetch_results: vec![],
             fetch_pos: 0,
             tgt_cols: Vec::new(),
+            pushed_eq_key: None,
         })
     }
 
@@ -347,32 +331,50 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         limit: &Option<Limit>,
         options: &std::collections::HashMap<String, String>,
     ) -> Result<(), EtcdFdwError> {
+        // Reset scan state up front so begin_scan is idempotent and re-entrant:
+        // a partial prior scan that errored before end_scan, or any future
+        // framework change that skips end_scan, can't leak results or
+        // pushed-down qual metadata into the new scan.
+        self.fetch_results.clear();
+        self.fetch_pos = 0;
+        self.tgt_cols.clear();
+        self.pushed_eq_key = None;
+
         // parse the options defined when `CREATE FOREIGN TABLE`
         let prefix = options.get("prefix").cloned();
         let range_end = options.get("range_end").cloned();
         let key_start = options.get("key").cloned();
-        let keys_only = options.get("keys_only").map(|v| v == "true").unwrap_or(false);
-        let revision = options.get("revision").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-        let serializable = options.get("consistency").map(|v| v == "s").unwrap_or(false);
+        let keys_only = options
+            .get("keys_only")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let revision = options
+            .get("revision")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let serializable = options
+            .get("consistency")
+            .map(|v| v == "s")
+            .unwrap_or(false);
         let mut qual_key_start: Option<String> = None;
         let mut qual_prefix: Option<String> = None;
         let mut qual_range_end: Option<String> = None;
-        let mut get_options = GetOptions::new();
+        let mut range_options = RangeOptions::default();
 
         if let Some(x) = limit {
-            get_options = get_options.with_limit(x.count);
+            range_options = range_options.with_limit(x.count as u64);
         }
 
         if keys_only {
-            get_options = get_options.with_keys_only();
+            range_options = range_options.with_keys_only();
         }
 
         if revision > 0 {
-            get_options = get_options.with_revision(revision);
+            range_options = range_options.with_revision(revision);
         }
 
         if serializable {
-            get_options = get_options.with_serializable();
+            range_options = range_options.with_serializable();
         }
 
         // WHERE clause pushdown
@@ -382,17 +384,25 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 continue;
             }
 
-            // extract string value
-            let v = match &q.value {
-                Value::Cell(Cell::String(s)) => s.clone(),
-                _ => continue,
+            // Extract the bound value as text. `qual_bound_value` accepts any
+            // Cell variant (not just String) and prefers `param.eval_value`
+            // over `qual.value`, so it sees the actual outer-join value
+            // rather than the plan-time dummy for Param-backed quals.
+            let Some(v) = qual_bound_value(q) else {
+                continue;
             };
 
             match q.operator.as_str() {
                 "=" => {
                     // equal: start at v, end at v+"\0"
                     qual_key_start = Some(v.clone());
-                    qual_range_end = Some(format!("{}\0", v));
+                    qual_range_end = Some(format!("{}\0", &v));
+                    // Remember the expected key so iter_scan can verify every
+                    // emitted row matches it -- a safety net for cases where
+                    // pushdown silently fails (NULL outer value, unconvertible
+                    // datum, etc.) and would otherwise leak unrelated rows
+                    // into the join output.
+                    self.pushed_eq_key = Some(v);
                 }
                 ">=" => {
                     // greater or equal: start at v
@@ -503,30 +513,28 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
         // Otherwise, use the effective key start
         let key = match &eff_prefix {
             Some(p) => {
-                get_options = get_options.with_prefix();
+                range_options = range_options.with_prefix();
                 // Ensure the key starts from the larger of the prefix or the effective key start
                 std::cmp::max(eff_key_start.clone(), p.clone())
             }
             None => eff_key_start.clone(),
         };
 
-        get_options = get_options.with_range(eff_range_end);
+        range_options = range_options.with_range(eff_range_end);
 
         // sort pushdown
+        // etcd v3 API: sort_target 0=KEY, 1=VALUE; sort_order 0=ASCEND, 1=DESCEND
         if let Some(first_sort) = sort.first() {
             let field_name = first_sort.field.to_ascii_uppercase();
 
-            if let Some(target) = SortTarget::from_str_name(&field_name) {
-                let order = if first_sort.reversed {
-                    SortOrder::Descend
-                } else {
-                    SortOrder::Ascend
-                };
+            let sort_target = match field_name.as_str() {
+                "KEY" => 0,
+                "VALUE" => 1,
+                _ => return Err(EtcdFdwError::InvalidSortField(first_sort.field.clone())),
+            };
+            let sort_order = if first_sort.reversed { 1 } else { 0 };
 
-                get_options = get_options.with_sort(target, order);
-            } else {
-                return Err(EtcdFdwError::InvalidSortField(first_sort.field.clone()));
-            }
+            range_options = range_options.with_sort(sort_target, sort_order);
         }
 
         self.ensure_connected()?;
@@ -534,46 +542,69 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             .client
             .as_mut()
             .expect("client must be connected after ensure_connected");
-        let result = self.rt.block_on(client.get(key, Some(get_options)));
-        let mut result_unwrapped = match result {
+        let result = client.range(&key, range_options);
+        self.fetch_results = match result {
             Ok(x) => x,
             Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
         };
-        self.fetch_results = result_unwrapped.take_kvs();
         self.fetch_pos = 0;
-        self.tgt_cols = columns.to_vec();
+        self.tgt_cols.clear();
+        for c in columns {
+            self.tgt_cols.push(c.name.clone());
+        }
         Ok(())
     }
 
     fn iter_scan(&mut self, row: &mut Row) -> EtcdFdwResult<Option<()>> {
         // Walk the buffered results with a cursor. Draining the front of the
         // vector on every call would be O(n) per row, i.e. O(n^2) per scan.
-        if self.fetch_pos >= self.fetch_results.len() {
-            return Ok(None);
-        }
-
-        let kv = &self.fetch_results[self.fetch_pos];
-        // etcd keys/values are arbitrary bytes; replace any invalid UTF-8
-        // instead of panicking, since the columns are exposed as `text`.
-        let key = String::from_utf8_lossy(kv.key()).into_owned();
-        let value = String::from_utf8_lossy(kv.value()).into_owned();
-        self.fetch_pos += 1;
-
-        for tgt_col in &self.tgt_cols {
-            if tgt_col.name == "key" {
-                row.push(&tgt_col.name, Some(Cell::String(key.clone())));
+        //
+        // If an exact-match key was pushed down, skip rows whose key doesn't
+        // match -- this guards against any failure mode where begin_scan
+        // couldn't honor the qual (NULL outer value, unconvertible datum,
+        // stale fetch_results, ...) and would otherwise leak unrelated rows
+        // into the join output.
+        loop {
+            if self.fetch_pos >= self.fetch_results.len() {
+                return Ok(None);
             }
-            if tgt_col.name == "value" {
-                row.push(&tgt_col.name, Some(Cell::String(value.clone())));
-            }
-        }
 
-        Ok(Some(()))
+            let kv = &self.fetch_results[self.fetch_pos];
+            // etcd keys/values are arbitrary bytes; replace any invalid UTF-8
+            // instead of panicking, since the columns are exposed as `text`.
+            let key = String::from_utf8_lossy(kv.key()).into_owned();
+            let value = String::from_utf8_lossy(kv.value()).into_owned();
+            self.fetch_pos += 1;
+
+            if let Some(expected) = &self.pushed_eq_key {
+                if &key != expected {
+                    continue;
+                }
+            }
+
+            for tgt_col in &self.tgt_cols {
+                if tgt_col == "key" {
+                    row.push(&tgt_col, Some(Cell::String(key.clone())));
+                }
+                if tgt_col == "value" {
+                    row.push(&tgt_col, Some(Cell::String(value.clone())));
+                }
+            }
+
+            return Ok(Some(()));
+        }
+    }
+
+    fn re_scan(&mut self) -> EtcdFdwResult<()> {
+        self.fetch_pos = 0;
+        Ok(())
     }
 
     fn end_scan(&mut self) -> EtcdFdwResult<()> {
         self.fetch_results = vec![];
         self.fetch_pos = 0;
+        self.tgt_cols.clear();
+        self.pushed_eq_key = None;
         Ok(())
     }
 
@@ -598,22 +629,17 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             .expect("client must be connected after ensure_connected");
 
         // Reject duplicates: error if the key already exists.
-        match self.rt.block_on(client.get(key, None)) {
-            Ok(x) => {
-                if x.kvs().iter().any(|kv| kv.key() == key.as_bytes()) {
+        match client.range(key, RangeOptions::default()) {
+            Ok(kvs) => {
+                if kvs.iter().any(|kv| kv.key() == key.as_bytes()) {
                     return Err(EtcdFdwError::KeyAlreadyExists(key.to_string()));
                 }
             }
             Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
         }
 
-        match self
-            .rt
-            .block_on(client.put(key, value, Some(PutOptions::new())))
-        {
-            Ok(_) => Ok(()),
-            Err(e) => Err(EtcdFdwError::UpdateError(e.to_string())),
-        }
+        client.put(key, value)?;
+        Ok(())
     }
 
     fn update(&mut self, rowid: &Cell, new_row: &Row) -> Result<(), EtcdFdwError> {
@@ -630,19 +656,17 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             .expect("client must be connected after ensure_connected");
 
         // The key must already exist; an exact `get` returns it or nothing.
-        match self.rt.block_on(client.get(key, None)) {
-            Ok(x) => {
-                if !x.kvs().iter().any(|kv| kv.key() == key.as_bytes()) {
+        match client.range(key, RangeOptions::default()) {
+            Ok(kvs) => {
+                if !kvs.iter().any(|kv| kv.key() == key.as_bytes()) {
                     return Err(EtcdFdwError::KeyDoesntExist(key.to_string()));
                 }
             }
             Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
         }
 
-        match self.rt.block_on(client.put(key, value, None)) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(EtcdFdwError::UpdateError(e.to_string())),
-        }
+        client.put(key, value)?;
+        Ok(())
     }
 
     fn delete(&mut self, rowid: &Cell) -> Result<(), EtcdFdwError> {
@@ -655,30 +679,23 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
             .as_mut()
             .expect("client must be connected after ensure_connected");
 
-        match self.rt.block_on(client.get(key, None)) {
-            Ok(x) => {
-                if !x.kvs().iter().any(|kv| kv.key() == key.as_bytes()) {
+        match client.range(key, RangeOptions::default()) {
+            Ok(kvs) => {
+                if !kvs.iter().any(|kv| kv.key() == key.as_bytes()) {
                     return Err(EtcdFdwError::KeyDoesntExist(key.to_string()));
                 }
             }
             Err(e) => return Err(EtcdFdwError::FetchError(e.to_string())),
         }
 
-        match self
-            .rt
-            .block_on(client.delete(key, Some(DeleteOptions::new())))
-        {
-            Ok(x) => {
-                if x.deleted() == 0 {
-                    return Err(EtcdFdwError::UpdateError(format!(
-                        "Deletion seemingly successful, but deleted count is {}",
-                        x.deleted()
-                    )));
-                }
-                Ok(())
-            }
-            Err(e) => Err(EtcdFdwError::UpdateError(e.to_string())),
+        let deleted = client.delete(key)?;
+        if deleted == 0 {
+            return Err(EtcdFdwError::UpdateError(format!(
+                "Deletion seemingly successful, but deleted count is {}",
+                deleted
+            )));
         }
+        Ok(())
     }
 
     // fn get_rel_size(
@@ -705,7 +722,11 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 let cacert_path_exists = check_options_contain(&options, "ssl_ca").is_ok();
                 let cert_path_exists = check_options_contain(&options, "ssl_cert").is_ok();
 
-                require_pair(cacert_path_exists, cert_path_exists, EtcdFdwError::CertKeyMismatch(()))?;
+                require_pair(
+                    cacert_path_exists,
+                    cert_path_exists,
+                    EtcdFdwError::CertKeyMismatch(()),
+                )?;
             } else if oid == FOREIGN_TABLE_RELATION_ID {
                 check_options_contain(&options, "rowid_column")?;
 
@@ -724,7 +745,11 @@ impl ForeignDataWrapper<EtcdFdwError> for EtcdFdw {
                 let user_exists = check_options_contain(&options, "user").is_ok();
                 let password_exists = check_options_contain(&options, "password").is_ok();
 
-                require_pair(user_exists, password_exists, EtcdFdwError::UserPassMismatch(()))?;
+                require_pair(
+                    user_exists,
+                    password_exists,
+                    EtcdFdwError::UserPassMismatch(()),
+                )?;
             }
         }
 
@@ -751,7 +776,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use etcd_client::Permission;
+    use etcd_client::{Client, ConnectOptions, Permission};
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
@@ -777,11 +802,13 @@ mod tests {
 
         // add root user and role
         client.role_add("root").await.expect("add role");
-        client.user_add(ETCD_USER, ETCD_PASS, None)
+        client
+            .user_add(ETCD_USER, ETCD_PASS, None)
             .await
             .expect("add user");
 
-        client.user_grant_role(ETCD_USER, "root")
+        client
+            .user_grant_role(ETCD_USER, "root")
             .await
             .expect("grant role");
 
@@ -808,7 +835,7 @@ mod tests {
             .get_host_port_ipv4(2379.tcp())
             .expect("Exposed host port should be available");
 
-        let url = format!("{}:{}", host, port);
+        let url = format!("http://{}:{}", host, port);
         let rt = tokio::runtime::Runtime::new().expect("Tokio runtime should be initialized");
         rt.block_on(etcd_auth_setup(url.clone()));
         (container, url)
@@ -927,7 +954,10 @@ mod tests {
         let query_result = Spi::get_two::<String, String>("SELECT * FROM test WHERE key = 'key3'")
             .expect("SELECT * with key filter should work");
 
-        assert_eq!((Some(format!("key3")), Some(format!("value3"))), query_result);
+        assert_eq!(
+            (Some(format!("key3")), Some(format!("value3"))),
+            query_result
+        );
     }
 
     #[pg_test]
@@ -976,39 +1006,52 @@ mod tests {
             Spi::run("SELECT * FROM test;").expect("SELECT should work");
         });
 
-        assert!(result.is_err(), "Expected SELECT to fail due to invalid user mapping");
+        assert!(
+            result.is_err(),
+            "Expected SELECT to fail due to invalid user mapping"
+        );
 
         // Setup: create a role and user with limited permissions in etcd
         let rt = tokio::runtime::Runtime::new().expect("Tokio runtime should be initialized");
-        rt.block_on(
-            async {
-                let mut client: Client = Client::connect([url.clone()], Some(ConnectOptions::new().with_user(ETCD_USER, ETCD_PASS)))
-                    .await
-                    .expect("connect etcd");
-                client.role_add("rw_role").await.expect("add role");
-                // role with read and write permissions on keys starting with "/"
-                client.role_grant_permission("rw_role", Permission::with_from_key(Permission::read_write("/")))
-                    .await
-                    .expect("grant permission");
-                client.user_add("etcd_user", "secret", None)
-                    .await
-                    .expect("add user");
-                client.user_grant_role("etcd_user", "rw_role")
-                    .await
-                    .expect("grant role");
-            }
-        );
+        rt.block_on(async {
+            let mut client: Client = Client::connect(
+                [url.clone()],
+                Some(ConnectOptions::new().with_user(ETCD_USER, ETCD_PASS)),
+            )
+            .await
+            .expect("connect etcd");
+            client.role_add("rw_role").await.expect("add role");
+            // role with read and write permissions on keys starting with "/"
+            client
+                .role_grant_permission(
+                    "rw_role",
+                    Permission::with_from_key(Permission::read_write("/")),
+                )
+                .await
+                .expect("grant permission");
+            client
+                .user_add("etcd_user", "secret", None)
+                .await
+                .expect("add user");
+            client
+                .user_grant_role("etcd_user", "rw_role")
+                .await
+                .expect("grant role");
+        });
 
         // Alter user mapping to use the new limited permissions user
         Spi::run("ALTER USER MAPPING FOR CURRENT_USER SERVER etcd_test_server OPTIONS (SET user 'etcd_user', SET password 'secret');")
             .expect("Alter user mapping should work");
 
         // Test 2: Selecting a key outside of the user's permissions (should fail)
-        let invalid_result =  std::panic::catch_unwind(|| {
+        let invalid_result = std::panic::catch_unwind(|| {
             Spi::run("SELECT * FROM test;").expect("SELECT should work");
         });
 
-        assert!(invalid_result.is_err(), "Expected SELECT to fail due to insufficient permissions");
+        assert!(
+            invalid_result.is_err(),
+            "Expected SELECT to fail due to insufficient permissions"
+        );
 
         // Test 3: Selecting a key within the user's permissions
         let result = Spi::get_two::<String, String>("SELECT * FROM test WHERE key = '/gather'")
@@ -1073,6 +1116,65 @@ mod tests {
         assert_eq!(
             (Some("o'clock".to_string()), Some("'quoted'".to_string())),
             row
+        );
+    }
+
+    #[pg_test]
+    fn test_join() {
+        let (_container, url) = create_container();
+        create_fdt(url);
+
+        // Seed etcd-backed foreign table with three key/value pairs.
+        Spi::run(
+            "INSERT INTO test (key, value) VALUES
+                ('foo', 'bar'),
+                ('bar', 'baz'),
+                ('qux', 'quux')",
+        )
+        .expect("INSERT should work");
+
+        // Driving relation holds the keys we want to look up. Two rows share
+        // a key ('foo') to exercise the rescan-with-same-param-value path;
+        // one row ('bar') triggers a rescan with a different param value.
+        Spi::run("CREATE TABLE test_join (id SERIAL PRIMARY KEY, key varchar(255))")
+            .expect("CREATE TABLE should work");
+        Spi::run("INSERT INTO test_join (key) VALUES ('foo'), ('foo'), ('bar')")
+            .expect("INSERT test_join should work");
+
+        // Before the join fix, begin_scan silently dropped any Qual whose
+        // value wasn't a `Cell::String`, did a full keyspace scan on each
+        // rescan, and emitted whatever etcd happened to return. The join
+        // either produced a cartesian-product mess or matched the wrong
+        // (key, value) to each outer row. With the fix the inner side is
+        // pushed down to a point lookup on `key`, so each outer row
+        // matches exactly the corresponding etcd row.
+        let rows: Vec<(Option<i32>, Option<String>, Option<String>)> = Spi::connect_mut(|c| {
+            c.update(
+                "SELECT tj.id, fd.key, fd.value
+                 FROM test_join tj
+                 JOIN test fd ON tj.key = fd.key
+                 ORDER BY tj.id",
+                None,
+                &[],
+            )
+            .expect("SELECT join should work")
+            .map(|row| {
+                (
+                    row.get::<i32>(1).expect("id datum"),
+                    row.get::<String>(2).expect("key datum"),
+                    row.get::<String>(3).expect("value datum"),
+                )
+            })
+            .collect()
+        });
+
+        assert_eq!(
+            vec![
+                (Some(1), Some("foo".to_string()), Some("bar".to_string())),
+                (Some(2), Some("foo".to_string()), Some("bar".to_string())),
+                (Some(3), Some("bar".to_string()), Some("baz".to_string())),
+            ],
+            rows
         );
     }
 }
