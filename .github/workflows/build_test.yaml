@@ -55,7 +55,7 @@ jobs:
       # missing whenever the deps cache key changes (e.g. after Cargo.lock is
       # committed/updated). `cargo install` is a fast no-op when already present.
       - name: Install pgrx
-        run: cargo install cargo-pgrx --version 0.16.1 --locked
+        run: cargo install cargo-pgrx --version 0.16.1 --locked --force
       - run: cargo pgrx init
         if: steps.cache_pgrx.outputs.cache-hit != 'true'
       - run: cargo build --verbose
