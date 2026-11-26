@@ -24,7 +24,7 @@ The easiest way to get started is using the provided DevContainer configuration:
 
 ### Option 2: Manual Setup
 
-- Install pgrx on your machine `cargo install --locked cargo-pgrx --version 0.16.1`
+- Install pgrx on your machine `cargo install --locked cargo-pgrx --version 0.20.1`
 - Setup pgrx `cargo pgrx init`
 - Install protoc and protobuf (needed by etcd-client)
   - Instructions can be found [on the official site](https://protobuf.dev/installation/)
