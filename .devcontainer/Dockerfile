@@ -30,7 +30,7 @@ ENV PATH="/home/vscode/.cargo/bin:${PATH}"
 ENV CARGO_HOME="/home/vscode/.cargo"
 
 # Install pgrx as vscode user
-ENV CARGO_PGRX_VERSION=0.16.1
+ENV CARGO_PGRX_VERSION=0.20.1
 RUN cargo install --force --locked cargo-pgrx@"${CARGO_PGRX_VERSION}"
 
 # Set working directory
